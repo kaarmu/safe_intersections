@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<launch>
+
+    <!-- Launch file arguments -->
+    <arg name="is_sim" default="true"/>
+    <arg name="use_rviz" default="true"/>
+    <arg name="remote_rviz" default="false"/>
+
+    <!-- Launch file constants -->
+    <arg name="map_file" value="$(find svea_core)/resources/maps/floor2.yaml" />
+
+    <!-- Publish map -->
+    <node if="$(arg is_sim)"  
+	  name="map_server" pkg="map_server" type="map_server"
+	  args="$(arg map_file)" output="screen" />
+
+    <group unless="$(arg is_sim)">
+
+	<!-- Start low-level interface -->
+        <node name="serial_node" pkg="rosserial_python" type="serial_node.py">
+            <param name="port" value="/dev/ttyACM0"/>
+            <param name="baud" value="250000"/>
+        </node>
+
+	<!-- Start localization -->
+	<include file="$(find svea_sensors)/launch/localize.launch">
+	    <arg name="use_rs" value="true"/>
+	    <arg name="file_name" value="$(arg map_file)"/>
+	</include>
+	
+    </group>
+
+    <!-- Start RViz -->
+    <node if="$(eval use_rviz and not remote_rviz)" 
+ 	  name="rviz" pkg="rviz" type="rviz"
+    	  args="-d $(find svea_core)/resources/rviz/SVEA_floor2.rviz" />
+
+    <!-- Start pure_pursuit -->
+    <node name="pure_pursuit" pkg="svea_pkg" type="pure_pursuit.py" output="screen">
+        <param name="use_rviz" value="$(arg use_rviz)"/>
+        <param name="is_sim" value="$(arg is_sim)"/>
+        <rosparam>
+            state: [-7.4, -15.3, 0.9] # initial state (x, y, yaw)
+            points:
+                - [-2.3, -7.1]  # Bottom right (project room)
+                - [10.5, 11.7]  # Top right
+                - [5.7, 15.0]  # Top left
+                - [-7.0, -4.0]  # Bottom left
+        </rosparam>
+    </node>
+
+</launch>
+

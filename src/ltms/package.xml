@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ltms</name>
+  <version>0.0.0</version>
+  <description>The ltms package</description>
+
+  <!-- One maintainer tag required, multiple allowed, one person per tag -->
+  <maintainer email="frankji@kth.se">Frank Jiang</maintainer>
+  <maintainer email="kajarf@kth.se">Kaj Munhoz Arfvidsson</maintainer>
+
+  <!-- One license tag required, multiple allowed, one license per tag -->
+  <license>MIT</license>
+
+  <!-- Url tags are optional, but multiple are allowed, one per tag -->
+  <url type="website">https://github.com/KTH-SML/svea</url>
+
+  <!-- Author tags are optional, multiple are allowed, one per tag -->
+  <author email="tbolin@kth.se">Tobias Bolin</author>
+  <author email="frankji@kth.se">Frank Jiang</author>
+
+
+  <!-- The *depend tags are used to specify dependencies -->
+  <!-- Dependencies can be catkin packages or system dependencies -->
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>svea_core</depend>
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <test_depend>rosunit</test_depend>
+
+  <!-- The export tag contains other, unspecified, tags -->
+  <export>
+    <!-- Other tools can request additional information be placed here -->
+
+  </export>
+</package>

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="mocap_name"/>
+
+    <include file="$(find svea_mocap)/launch/localization_comparison.launch">
+        <arg name="mocap_name" value="$(arg mocap_name)"/>
+    </include>
+    
+    <arg name="localization_topic" default="/state"/>
+    <arg name="ground_truth_topic" default="/qualisys/svea7/pose"/>
+
+    <node pkg="svea_mocap" type="localization_comparison_ui.py" name="localization_comparison_ui" output="screen">
+        <param name="ground_truth_topic" value="$(arg ground_truth_topic)"/>
+        <param name="localization_topic" value="$(arg localization_topic)"/>
+    </node>
+
+</launch>
