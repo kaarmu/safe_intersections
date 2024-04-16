@@ -2,6 +2,7 @@
 
 import numpy as np
 import rospy
+from collections import deque
 
 # SVEA imports
 from svea.states import VehicleState
@@ -81,9 +82,23 @@ def publish_initialpose(state, n=10):
         rate.sleep()
 
 
-class node:
+class Vehicle:
 
     DELTA_TIME = 0.1
+
+    OUTSIDE_ROUTES = {
+        'exit_s': 'entry_w',
+        'exit_w': 'entry_n',
+        'exit_n': 'entry_e',
+        'exit_e': 'entry_s',
+    }
+
+    INSIDE_ROUTES = {
+        'entry_s': ['exit_w', 'exit_n', 'exit_e'],
+        'entry_w': ['exit_n', 'exit_e', 'exit_s'],
+        'entry_n': ['exit_e', 'exit_s', 'exit_w'],
+        'entry_e': ['exit_s', 'exit_w', 'exit_n'],
+    }
 
     def __init__(self):
 
@@ -95,7 +110,7 @@ class node:
 
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
-        self.STATE = load_param("~state", [0, 0, 0, 0])
+        self.STATE = load_param("~state", [4, 4, np.pi*3/4, 0])
         self.IS_SIM = load_param('~is_sim', True)
         self.USE_MOCAP = load_param('~use_mocap', False)
 
@@ -104,6 +119,8 @@ class node:
         # initial state
         state = VehicleState(*self.STATE)
         publish_initialpose(state)
+
+        self.goto_waypoints = deque(maxlen=5)
 
         ## Create simulators, models, managers, etc.
 
@@ -131,7 +148,8 @@ class node:
 
         ## Create controller and planner
 
-        self.planner = AStarPlanner(0.1, limit=[[0, 2.5], [0, 2.5]])
+        self.planner = AStarPlanner(0.1, limit=[[-5, 5], [-5, 5]], #obstacles=centered_rect(2.5, 2.5, 0.6, 0.5)
+                                    )
         self.controller = PurePursuitController()
         self.controller.set_path([[0, 0]])
 
@@ -180,22 +198,27 @@ class node:
         path = self.planner.plan(init, goal)
         self.planning.set_points_path(path)
         self.planning.publish_path()
-        return path
-    
-    def clicked_point_cb(self, msg):
-        goal = msg.point.x, msg.point.y
-        path = self.goto(goal)
         self.controller.set_path(path)
         self.controller.set_target_velocity(0.8)
-
+        self.controller.is_finished = False
+        rospy.loginfo("Going to (%f, %f)", *goal)
+        return path
+    
+    def goto_next_waypoint(self):
+        if self.goto_waypoints:
+            goal = self.goto_waypoints.popleft()
+            self.goto(goal)
+    
+    def clicked_point_cb(self, msg):
+        wayp = msg.point.x, msg.point.y
+        if wayp not in self.planner.world:
+            rospy.loginfo("Waypoint not in world.")
+        self.goto_waypoints.append(wayp)
+        
     def spin(self):
-        # limit the rate of main loop by waiting for state
-        # state = self.svea.wait_for_state()
 
-        # if self.controller.is_finished:
-        #     self.update_goal()
-        #     xs, ys = self.compute_traj(self.state)
-        #     self.update_traj(xs, ys)
+        if self.controller.is_finished:
+            self.goto_next_waypoint()
 
         steering, velocity = self.controller.compute_control(self.state)
         self.actuation.send_control(steering, velocity)
@@ -205,8 +228,44 @@ class node:
             self.spin()
             self.rate.sleep()
 
+
+### dirty tests
+
+def plot_obs(obs):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 1)
+    for x, y, r in obs:
+        patch = plt.Circle((x, y), r, fill=True, color='black')
+        ax.add_patch(patch)
+    ax.set_xlim(-5, 5)
+    ax.set_ylim(-5, 5)
+    fig.show()
+def centered_rect(w, h, r, d):
+    p1 = -w/2, -h/2
+    p2 = -w/2, +h/2
+    p3 = +w/2, +h/2
+    p4 = +w/2, -h/2
+    return rect([p1, p2, p3, p4], r, d)
+def rect(ps, r, d):
+    p1, p2, p3, p4 = ps
+    out = []
+    out.extend(line(p1, p2, r, d))
+    out.extend(line(p2, p3, r, d))
+    out.extend(line(p3, p4, r, d))
+    out.extend(line(p4, p1, r, d))
+    return out
+def line(p1, p2, r, d):
+    n = int(np.hypot(p2[0] - p1[0], p2[1] - p1[1]) / d)
+    out = np.zeros((n+1, 3))
+    out[:, 0] = np.linspace(p1[0], p2[0], n+1)
+    out[:, 1] = np.linspace(p1[1], p2[1], n+1)
+    out[:, 2] = r
+    return out
+def test_obs():
+    plot_obs(centered_rect(2.5, 2.5, 0.5, 0.5))
+
 if __name__ == '__main__':
 
     ## Start node ##
-    node().run()
+    Vehicle().run()
 

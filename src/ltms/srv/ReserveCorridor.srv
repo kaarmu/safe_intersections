@@ -1,0 +1,15 @@
+string name
+string isotime
+string entry
+string exit
+float32 earliest_entry
+float32 latest_entry
+---
+bool success
+string reason
+string id
+string isotime
+float32 earliest_entry
+float32 latest_entry
+float32 earliest_exit
+float32 latest_exit

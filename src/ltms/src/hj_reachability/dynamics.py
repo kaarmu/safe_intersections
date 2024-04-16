@@ -53,8 +53,12 @@ class ControlAndDisturbanceAffineDynamics(Dynamics):
 
     def __call__(self, state, control, disturbance, time):
         """Implements the affine dynamics `dx_dt = f(x, t) + G_u(x, t) @ u + G_d(x, t) @ d`."""
-        return (self.open_loop_dynamics(state, time) + self.control_jacobian(state, time) @ control +
-                self.disturbance_jacobian(state, time) @ disturbance)
+        uj = self.control_jacobian(state, time)
+        # dj = self.disturbance_jacobian(state, time)
+        a = self.open_loop_dynamics(state, time)
+        b = uj @ control
+        # c = dj @ disturbance
+        return a + b # + c
 
     @abc.abstractmethod
     def open_loop_dynamics(self, state, time):

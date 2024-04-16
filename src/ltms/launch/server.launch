@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+
+    <!-- Launch arguments -->
+    <arg name="name"          default="svea0"/>
+    <arg name="use_foxglove"  default="false"/>
+
+    <!-- Start Foxglove -->
+    <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
+        <arg name="port" value="8765" />
+    </include>
+
+    <!-- Start server node -->
+    <node name="ltms" pkg="ltms" type="server.py" output="screen">
+      <param name="name"      value="ltms"/>
+      <param name="data_dir"  value="$(find ltms)/data"/>
+    </node>
+
+</launch>

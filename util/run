@@ -23,4 +23,5 @@ istrue DEBUG && fn="echo" || fn="exec"
     --rm \
     --network host \
     --privileged \
+    --gpus all \
     "$@"

@@ -11,9 +11,11 @@
 #BUILD_TAG="ros:$ROSDISTRO"
 #IMAGE_TAG="ghcr.io/kth-sml/svea:$(uname -m)"
 
+CONTAINER_TOOL="docker"
+
 main() {
 
-    CONTAINER_TOOL="podman"
+    CONTAINER_TOOL="${CONTAINER_TOOL:-"docker"}"
 
     ROSDISTRO="${ROSDISTRO:-"noetic"}"
     WORKSPACE="${WORKSPACE:-"/svea_ws"}"
@@ -33,6 +35,7 @@ main() {
 
     if [ -n "$DEBUG" ]; then
         echo ""
+        echo "CONTAINER_TOOL=$CONTAINER_TOOL"
         echo "ROSDISTRO=$ROSDISTRO"
         echo "WORKSPACE=$WORKSPACE"
         echo "REPOSITORY_PATH=$REPOSITORY_PATH"
