@@ -264,6 +264,33 @@ def line(p1, p2, r, d):
 def test_obs():
     plot_obs(centered_rect(2.5, 2.5, 0.5, 0.5))
 
+def shifted_rect(xy, wh, r, d):
+        r = centered_rect(*wh, r, d)
+        r[:, 0] += xy[0]
+        r[:, 1] += xy[1]
+        return r
+    
+def rect(ps, r, d):
+        p1, p2, p3, p4 = ps
+        out = []
+        out.extend(line(p1, p2, r, d))
+        out.extend(line(p2, p3, r, d))
+        out.extend(line(p3, p4, r, d))
+        out.extend(line(p4, p1, r, d))
+        return np.array(out)
+def test_shifted():
+    tl = shifted_rect([-1, 1], [0.5, 0.5], r=0.25, d=0.25)
+    plot_obs(tl)
+    corner = lambda xy: shifted_rect(xy, [0.5, 0.5], r=0.25, d=0.25)
+    tl, tr, bl, br = map(corner, [(-1, +1), (-1, -1), (+1, -1), (+1, +1)])
+    help(np.concatenate)
+    plot_obs(np.concatenate((tl, tr, bl, br)))
+    c = centered_rect(1, 1, r=0.25, d=0.25)
+    plot_obs(np.concatenate((tl, tr, bl, br, c)))
+    c = centered_rect(1, 1, r=0.1, d=0.25)
+    plot_obs(np.concatenate((tl, tr, bl, br, c)))
+
+
 if __name__ == '__main__':
 
     ## Start node ##
