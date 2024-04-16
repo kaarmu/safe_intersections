@@ -15,6 +15,6 @@ fi
 
 istrue DEBUG && fn="echo" || fn="exec"
 
-"$fn" docker exec \
+"$fn" "$CONTAINER_TOOL" exec \
     -it \
     "$@"

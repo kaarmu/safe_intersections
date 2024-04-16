@@ -13,7 +13,7 @@ fi
 
 istrue DEBUG && fn="echo" || fn="exec"
 
-"$fn" docker build \
+"$fn" "$CONTAINER_TOOL" build \
     --network host \
     --build-arg "BUILD_TAG=$BUILD_TAG" \
     --build-arg "ROSDISTRO=$ROSDISTRO" \

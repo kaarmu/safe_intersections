@@ -13,6 +13,8 @@
 
 main() {
 
+    CONTAINER_TOOL="podman"
+
     ROSDISTRO="${ROSDISTRO:-"noetic"}"
     WORKSPACE="${WORKSPACE:-"/svea_ws"}"
 
