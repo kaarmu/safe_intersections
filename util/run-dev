@@ -22,5 +22,6 @@ istrue DEBUG && fn="echo" || fn="exec"
     -e "TERM=xterm-256color" \
     -v "$SHARED_VOLUME" \
     --rm \
+    --gpus all \
     "$@"
 

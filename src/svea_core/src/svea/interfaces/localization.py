@@ -43,6 +43,8 @@ class LocalizationInterface:
         self._ready_event = Event()
         rospy.on_shutdown(self._shutdown_callback)
 
+        self._block_event = Event()
+
         # list of functions to call whenever a new state comes in
         self.callbacks = []
 
@@ -52,6 +54,11 @@ class LocalizationInterface:
         """
         Thread(target=self._init_and_spin_ros, args=()).start()
         return self
+
+    def block_until_state(self, timeout=None):
+        self._block_event.clear()
+        self.add_callback(lambda _: self._block_event.set())
+        self._block_event.wait(timeout)
 
     def _wait_until_ready(self, timeout=20.0):
         tic = rospy.get_time()

@@ -1,5 +1,6 @@
 from time import time
 from math import ceil
+from struct import pack
 
 import numpy as np
 import numpy.lib.stride_tricks as st
@@ -67,7 +68,7 @@ class Solver:
 
     AVOID_MARGIN = 0
 
-    def __init__(self, grid: hj.Grid, dynamics: dict, time_horizon: float, time_step=0.1,  accuracy='medium', interactive=True):
+    def __init__(self, grid: hj.Grid, dynamics: dict, time_horizon: float, time_step: float,  accuracy='medium', interactive=True):
 
         self.grid = grid
 
@@ -82,6 +83,13 @@ class Solver:
         self.solver_settings = hj.SolverSettings.with_accuracy(accuracy)
 
         self.is_interactive = interactive
+
+        # simple code checks to guard against different solver settings
+        bs = pack('ff', self.time_horizon, self.time_step)
+        self.code_time = bytes([sum(bs) % 256]).hex()
+
+        bs = pack('i'*self.grid.ndim, *self.grid.shape)
+        self.code_grid = bytes([sum(bs) % 256]).hex()
 
     def brs(self, times, target, constraints=None, *, mode='reach'):
         dynamics = self.reach_dynamics if mode == 'reach' else self.avoid_dynamics
@@ -109,25 +117,26 @@ class Solver:
         Required kwargs for different passes:        
 
             Pass 1:
-                - timeline: time window of analysis
                 - exit: exit location
                 - constraints: state constraints
 
             Pass 2:
                 - pass1: output from Pass 1
-                - timeline: time window of analysis
                 - dangers: list of danger time-state sets
                 - exit: exit location
 
             Pass 3:
                 - pass2: output from Pass 2
-                - timeline: time window of analysis
                 - entry: entry location
 
             Pass 4:
                 - pass3: output from Pass 3
-                - timeline: time window of analysis
                 - exit: exit location
+
+        Returns:
+            - pass1, pass2, pass3, pass4: if requested
+            - earliest_entry, latest_exit: if pass3 was computed
+            - earliest_exit, latest_exit: if pass4 was computed
         """
 
         interactive = kwargs.pop('interactive', self.is_interactive)
@@ -144,8 +153,8 @@ class Solver:
             passes = ALL_PASSES
         passes = [name for name in ALL_PASSES if name in passes]
 
-        returns = list(passes)
-        output = {}
+        passes_out = list(passes)
+        out = {}
 
         for name in passes:
             assert name in ALL_PASSES, f'Invalid pass: {name}'
@@ -153,11 +162,11 @@ class Solver:
             
             if i > 0 and ALL_PASSES[i-1] not in passes + list(kwargs):
                 passes += [ALL_PASSES[i-1]]
-        passes = [name for name in ALL_PASSES if name in passes]
+        passes_sch = [name for name in ALL_PASSES if name in passes]
 
         if interactive:
             msg = 'Running analysis with the following passes: '
-            msg += ', '.join(passes) + '\n'
+            msg += ', '.join(passes_sch) + '\n'
             msg += '-' * (len(msg)-1)
             print(msg)
 
@@ -166,7 +175,7 @@ class Solver:
         def when_overlapping(a, b):
             return np.where(shp.project_onto(shp.intersection(a, b), 0) <= 0)[0]
         
-        if 'pass1' in passes:
+        if 'pass1' in passes_sch:
             if interactive:
                 print('\n', 'Pass 1: Initial BRS')
             
@@ -177,19 +186,20 @@ class Solver:
             constraints = rules
 
             start_time = time()
-            pass1 = self.brs(self.timeline, target, constraints)
+            output = self.brs(self.timeline, target, constraints)
             stop_time = time()
 
             if interactive:
                 print(f'Time To Compute: {stop_time - start_time:.02f}')
             
-            kwargs['pass1'] = pass1
+            kwargs['pass1'] = output
+            if 'pass1' in passes_out: out['pass1'] = output.copy()
 
-        if 'pass2' in passes:
+        if 'pass2' in passes_sch:
             if interactive:
                 print('\n', 'Pass 2: Avoidance')
             
-            pass2 = kwargs['pass1'].copy()
+            output = kwargs['pass1']
             avoid = kwargs['dangers']
             end = kwargs['exit']
 
@@ -198,17 +208,17 @@ class Solver:
                     *map(lambda target: to_shared(target, keepdims=True), avoid),
                 ) - self.AVOID_MARGIN # increase avoid set with heuristic margin
 
-                interact_window = when_overlapping(pass2, avoid_target)
+                interact_window = when_overlapping(output, avoid_target)
                 if 0 < interact_window.size:
                     i, j = interact_window[0], interact_window[-1] + 1
 
                     # Recompute solution until after last interaction
-                    constraints = shp.setminus(pass2, avoid_target)[:j+1]
-                    target = pass2[:j+1]    # last step is target to reach pass1
+                    constraints = shp.setminus(output, avoid_target)[:j+1]
+                    target = output[:j+1]    # last step is target to reach pass1
                     target[:-1] = end       # all other steps are recomputed to end
                     
                     start_time = time()
-                    pass2[:j+1] = self.brs(self.timeline[:j+1], target, constraints)
+                    output[:j+1] = self.brs(self.timeline[:j+1], target, constraints)
                     stop_time = time()
                 
                     if interactive:
@@ -216,28 +226,30 @@ class Solver:
                         print(f'First Interaction: {self.timeline[i]:.01f}')
                         print(f'Last Interaction: {self.timeline[j-1]:.01f}')
 
-            kwargs['pass2'] = pass2
+            kwargs['pass2'] = output
+            if 'pass2' in passes_out: out['pass2'] = output.copy()
 
-        if 'pass3' in passes:
+        if 'pass3' in passes_sch:
             if interactive:
                 print('\n', 'Pass 3: Planning, Departure')
             
-            pass3 = kwargs['pass2'].copy()
+            output = kwargs['pass2']
             start = kwargs['entry']
 
-            
             min_nsteps = ceil(min_window_entry / self.time_step)
             max_nsteps = ceil(max_window_entry / self.time_step)
-            depart_target = shp.intersection(pass3, start)
+            depart_target = shp.intersection(output, start)
             depart_window = earliest_window(shp.project_onto(depart_target, 0) <= 0, min_nsteps)
-            assert depart_window.size > 0, 'No time window to enter region'
-            i = depart_window[0] # Earliest entry
-            j = depart_window[min(max_nsteps+1, len(depart_window)-1)] # Latest entry
+            assert depart_window.size > 0, 'Analysis Failed: No time window to enter region'
+            w0 = 0
+            wn = min(max_nsteps+1, len(depart_window)-1)
+            i = depart_window[w0] # Earliest entry index
+            j = depart_window[wn] # Latest entry index
             depart_target[j:] = 1
 
             start_time = time()
-            pass3[i:] = self.frs(self.timeline[i:], depart_target[i:], pass3[i:])
-            pass3[:i] = 1 # Remove all values before departure
+            output[i:] = self.frs(self.timeline[i:], depart_target[i:], output[i:])
+            output[:i] = 1 # Remove all values before departure
             stop_time = time()
 
             if interactive:
@@ -245,28 +257,32 @@ class Solver:
                 print(f'Earliest Departure: {self.timeline[i]:.01f}')
                 print(f'Latest Departure: {self.timeline[j-1]:.01f}')
 
-            kwargs['pass3'] = pass3
-            output['entry_window'] = (self.timeline[i], self.timeline[j])
+            kwargs['pass3'] = output
+            if 'pass3' in passes_out: out['pass3'] = output.copy()
+            out['earliest_entry'] = self.timeline[i]
+            out['latest_entry'] = self.timeline[j-1]
 
-        if 'pass4' in passes:
+        if 'pass4' in passes_sch:
             if interactive:
                 print('\n', 'Pass 4: Planning, Arrival')
             
-            pass4 = kwargs['pass3'].copy()
+            output = kwargs['pass3']
             end = kwargs['exit']
 
             min_nsteps = ceil(min_window_exit / self.time_step)
             max_nsteps = ceil(max_window_exit / self.time_step)
-            arrival_target = shp.intersection(pass4, end)
+            arrival_target = shp.intersection(output, end)
             arrival_window = earliest_window(shp.project_onto(arrival_target, 0) <= 0, min_nsteps)
-            assert arrival_window.size > 0, 'No time window to exit region'
-            m = arrival_window[0] # Earliest exit
-            n = arrival_window[min(max_nsteps+1, len(depart_window)-1)] # Latest exit
+            assert arrival_window.size > 0, 'Analysis Failed: No time window to exit region'
+            w0 = 0
+            wn = min(max_nsteps+1, len(depart_window)-1)
+            m = arrival_window[w0] # Earliest exit index
+            n = arrival_window[wn] # Latest exit index
             arrival_target[n:] = 1
 
             start_time = time()
-            pass4[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], pass4[i:n])
-            pass4[n:] = 1 # Remove all values after arrival
+            output[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], output[i:n])
+            output[n:] = 1 # Remove all values after arrival
             stop_time = time()
 
             if interactive:
@@ -274,11 +290,12 @@ class Solver:
                 print(f'Earliest Arrival: {self.timeline[m]:.01f}')
                 print(f'Latest Arrival: {self.timeline[n-1]:.01f}')
 
-            kwargs['pass4'] = pass4
-            output['exit_window'] = (self.timeline[m], self.timeline[n])
+            kwargs['pass4'] = output
+            if 'pass4' in passes_out: out['pass4'] = output.copy()
+            out['earliest_exit'] = self.timeline[m]
+            out['latest_exit'] = self.timeline[n-1]
         
-        output.update({name: kwargs[name] for name in returns})
-        return output
+        return out
 
     def run_many(self, *objectives, **kwargs):
         results = []
@@ -300,91 +317,107 @@ def create_4way(grid, *envs):
 
     speedlimit = shp.rectangle(grid, axes=V, target_min=0.3, target_max=0.6)
 
-    if {'entry_s', 'exit_s'} & set(envs) and 'road_s' not in envs:
-        envs += ('road_s',)
-    if {'entry_w', 'exit_w'} & set(envs) and 'road_w' not in envs:
-        envs += ('road_w',)
-    if {'entry_n', 'exit_n'} & set(envs) and 'road_n' not in envs:
-        envs += ('road_n',)
-    if {'entry_e', 'exit_e'} & set(envs) and 'road_e' not in envs:
-        envs += ('road_e',)
-    if {'road_s', 'road_w', 'road_n', 'road_e'} & set(envs) and 'center' not in envs:
-        envs += ('center',)
+    envs_out = tuple(envs)
+    envs_sch = tuple(envs)
 
-    if 'center' in envs:
+    # BIG OBS TO SELF: if entering from south then we're traveling in north direction
+    # => => => 'entry_s' requires 'road_n'
+
+    if {'entry_n', 'exit_s'} & set(envs_sch) and 'road_s' not in envs_sch:
+        envs_sch += ('road_s',)
+    if {'entry_e', 'exit_w'} & set(envs_sch) and 'road_w' not in envs_sch:
+        envs_sch += ('road_w',)
+    if {'entry_s', 'exit_n'} & set(envs_sch) and 'road_n' not in envs_sch:
+        envs_sch += ('road_n',)
+    if {'entry_w', 'exit_e'} & set(envs_sch) and 'road_e' not in envs_sch:
+        envs_sch += ('road_e',)
+    if {'road_s', 'road_w', 'road_n', 'road_e'} & set(envs_sch) and 'center' not in envs_sch:
+        envs_sch += ('center',)
+
+    ## CENTER ##
+
+    if 'center' in envs_sch:
         out['center'] = shp.intersection(shp.hyperplane(grid, normal=[-1, -1], offset=[X0 + 0.25*XN, Y0 + 0.25*YN]),
-                                        shp.hyperplane(grid, normal=[+1, -1], offset=[X0 + 0.75*XN, Y0 + 0.25*YN]),
-                                        shp.hyperplane(grid, normal=[+1, +1], offset=[X0 + 0.75*XN, Y0 + 0.75*YN]),
-                                        shp.hyperplane(grid, normal=[-1, +1], offset=[X0 + 0.25*XN, Y0 + 0.75*YN]),
-                                        shp.rectangle(grid,
-                                                    target_min=[X0 + 0.2*XN, Y0 + 0.2*YN],
-                                                    target_max=[X0 + 0.8*XN, Y0 + 0.8*YN]))
+                                         shp.hyperplane(grid, normal=[+1, -1], offset=[X0 + 0.75*XN, Y0 + 0.25*YN]),
+                                         shp.hyperplane(grid, normal=[+1, +1], offset=[X0 + 0.75*XN, Y0 + 0.75*YN]),
+                                         shp.hyperplane(grid, normal=[-1, +1], offset=[X0 + 0.25*XN, Y0 + 0.75*YN]),
+                                         shp.rectangle(grid,
+                                                       target_min=[X0 + 0.2*XN, Y0 + 0.2*YN],
+                                                       target_max=[X0 + 0.8*XN, Y0 + 0.8*YN]))
         out['center'] = shp.intersection(out['center'], speedlimit)
     
-    if 'road_e' in envs:
+    ## ROADS ##
+
+    if 'road_e' in envs_sch:
         out['road_e'] = shp.rectangle(grid,
                                     axes=[Y, A],
                                     target_min=[Y0 + 0.3*YN, -np.pi/5],
                                     target_max=[Y0 + 0.5*YN, +np.pi/5])
         out['road_e'] = shp.union(shp.intersection(out['road_e'], speedlimit), out['center'])
-    if 'road_w' in envs:
+    if 'road_w' in envs_sch:
         out['road_w'] = shp.rectangle(grid,
                                     axes=[Y, A],
                                     target_min=[Y0 + 0.5*YN, +np.pi - np.pi/5],
                                     target_max=[Y0 + 0.7*YN, -np.pi + np.pi/5])
         out['road_w'] = shp.union(shp.intersection(out['road_w'], speedlimit), out['center'])
-    if 'road_n' in envs:
+    if 'road_n' in envs_sch:
         out['road_n'] = shp.rectangle(grid,
                                     axes=[X, A],
                                     target_min=[X0 + 0.5*XN, +np.pi/2 - np.pi/5],
                                     target_max=[X0 + 0.7*XN, +np.pi/2 + np.pi/5])
         out['road_n'] = shp.union(shp.intersection(out['road_n'], speedlimit), out['center'])
-    if 'road_s' in envs:
+    if 'road_s' in envs_sch:
         out['road_s'] = shp.rectangle(grid,
                                     axes=[X, A],
                                     target_min=[X0 + 0.3*XN, -np.pi/2 - np.pi/5],
                                     target_max=[X0 + 0.5*XN, -np.pi/2 + np.pi/5])
         out['road_s'] = shp.union(shp.intersection(out['road_s'], speedlimit), out['center'])
 
-    if 'entry_e' in envs:
+    ## ENTRIES ##
+
+    if 'entry_e' in envs_sch:
         out['entry_e']  = shp.rectangle(grid, 
-                                        target_min=[0.85*XN, 0.53*YN], 
-                                        target_max=[1.00*XN, 0.67*YN])
-        out['entry_e']  = shp.intersection(out['entry_e'], out['road_e'])
-    if 'exit_e' in envs:
-        out['exit_e']   = shp.rectangle(grid, 
-                                        target_min=[0.85*XN, 0.33*YN], 
-                                        target_max=[1.00*XN, 0.47*YN])
-        out['exit_e']   = shp.intersection(out['exit_e'], out['road_e'])
-    if 'entry_w' in envs:
+                                        target_min=[X0 + 0.85*XN, Y0 + 0.53*YN], 
+                                        target_max=[X0 + 1.00*XN, Y0 + 0.67*YN])
+        out['entry_e']  = shp.intersection(out['entry_e'], out['road_w'])
+    if 'entry_w' in envs_sch:
         out['entry_w']  = shp.rectangle(grid, 
-                                        target_min=[0.00*XN, 0.33*YN], 
-                                        target_max=[0.15*XN, 0.47*YN])
-        out['entry_w']  = shp.intersection(out['entry_w'], out['road_w'])
-    if 'exit_w' in envs:
-        out['exit_w']   = shp.rectangle(grid, 
-                                        target_min=[0.00*XN, 0.53*YN], 
-                                        target_max=[0.15*XN, 0.67*YN])
-        out['exit_w']   = shp.intersection(out['exit_w'], out['road_w'])
-    if 'entry_n' in envs:
+                                        target_min=[X0 + 0.00*XN, Y0 + 0.33*YN], 
+                                        target_max=[X0 + 0.15*XN, Y0 + 0.47*YN])
+        out['entry_w']  = shp.intersection(out['entry_w'], out['road_e'])
+    if 'entry_n' in envs_sch:
         out['entry_n']  = shp.rectangle(grid, 
-                                        target_min=[0.33*XN, 0.85*YN], 
-                                        target_max=[0.47*XN, 1.00*YN])
-        out['entry_n']  = shp.intersection(out['entry_n'], out['road_n'])
-    if 'exit_n' in envs:
-        out['exit_n']   = shp.rectangle(grid, 
-                                        target_min=[0.53*XN, 0.85*YN], 
-                                        target_max=[0.67*XN, 1.00*YN])
-        out['exit_n']   = shp.intersection(out['exit_n'], out['road_n'])
-    if 'entry_s' in envs:
+                                        target_min=[X0 + 0.33*XN, Y0 + 0.85*YN], 
+                                        target_max=[X0 + 0.47*XN, Y0 + 1.00*YN])
+        out['entry_n']  = shp.intersection(out['entry_n'], out['road_s'])
+    if 'entry_s' in envs_sch:
         out['entry_s']  = shp.rectangle(grid, 
-                                        target_min=[0.53*XN, 0.00*YN], 
-                                        target_max=[0.67*XN, 0.15*YN])
-        out['entry_s']  = shp.intersection(out['entry_s'], out['road_s'])
-    if 'exit_s' in envs:
+                                        target_min=[X0 + 0.53*XN, Y0 + 0.00*YN], 
+                                        target_max=[X0 + 0.67*XN, Y0 + 0.15*YN])
+        out['entry_s']  = shp.intersection(out['entry_s'], out['road_n'])
+
+    ## EXITS ##
+
+    if 'exit_e' in envs_sch:
+        out['exit_e']   = shp.rectangle(grid, 
+                                        target_min=[X0 + 0.85*XN, Y0 + 0.33*YN], 
+                                        target_max=[X0 + 1.00*XN, Y0 + 0.47*YN])
+        out['exit_e']   = shp.intersection(out['exit_e'], out['road_e'])
+    if 'exit_w' in envs_sch:
+        out['exit_w']   = shp.rectangle(grid, 
+                                        target_min=[X0 + 0.00*XN, Y0 + 0.53*YN], 
+                                        target_max=[X0 + 0.15*XN, Y0 + 0.67*YN])
+        out['exit_w']   = shp.intersection(out['exit_w'], out['road_w'])
+    if 'exit_n' in envs_sch:
+        out['exit_n']   = shp.rectangle(grid, 
+                                        target_min=[X0 + 0.53*XN, Y0 + 0.85*YN], 
+                                        target_max=[X0 + 0.67*XN, Y0 + 1.00*YN])
+        out['exit_n']   = shp.intersection(out['exit_n'], out['road_n'])
+    if 'exit_s' in envs_sch:
         out['exit_s']   = shp.rectangle(grid, 
-                                        target_min=[0.33*XN, 0.00*YN], 
-                                        target_max=[0.47*XN, 0.15*YN])
+                                        target_min=[X0 + 0.33*XN, Y0 + 0.00*YN], 
+                                        target_max=[X0 + 0.47*XN, Y0 + 0.15*YN])
         out['exit_s']   = shp.intersection(out['exit_s'], out['road_s'])
 
-    return out
+
+    return {name: out[name] for name in envs_out}

@@ -9,7 +9,8 @@ import numpy as np
 from threading import Thread
 import rospy
 import tf2_ros
-from geometry_msgs.msg import TransformStamped
+from tf.transformations import euler_from_quaternion
+from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from svea_msgs.msg import lli_ctrl, lli_emergency
 from svea.states import SVEAControlValues
 from .sim_lidar import SimLidar
@@ -79,6 +80,7 @@ class SimSVEA(object):
         self._request_topic = sub_namespace + 'lli/ctrl_request'
         self._actuated_topic = sub_namespace + 'lli/ctrl_actuated'
         self._emergency_topic = sub_namespace + 'lli/emergency'
+        self._initialpose_topic = '/initialpose'
 
         if vehicle_name:
             self.vehicle_name = vehicle_name
@@ -146,6 +148,9 @@ class SimSVEA(object):
         pass
 
     def _start_listen(self):
+        rospy.Subscriber(self._initialpose_topic,
+                         PoseWithCovarianceStamped,
+                         self._initialpose_cb)
         rospy.Subscriber(self._request_topic,
                          lli_ctrl,
                          self._update_ctrl_request)
@@ -253,6 +258,13 @@ class SimSVEA(object):
         changed = self.control_values.update_from_msg(ctrl_request_msg)
         if changed:
             self.ctrl_actuated_pub.publish(self.control_values.ctrl_msg)
+
+    def _initialpose_cb(self, msg):
+        self.model.state.x = msg.pose.pose.position.x
+        self.model.state.y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+        self.model.state.yaw = yaw
 
     @property
     def emergency(self):

@@ -188,7 +188,8 @@ class AStarWorld(object):
         # 4 cells that represent the 4 corners of the world (list of lists indicating the extreme points of the map)
         self.LIMIT = np.asarray(limit or self.LIMIT)
         # Obstacle list (if obstacles exists then self.OBS = obstacles, otherwise self.OBS = self.OBS, which is None at init)
-        self.OBS = obstacles or self.OBS
+        if obstacles is not None:
+            self.OBS = obstacles
         # Obstacles margins
         self.OBSTACLE_MARGIN = obs_margin or self.OBSTACLE_MARGIN
         # If no world resolution is given (so at init)
@@ -263,15 +264,17 @@ class AStarWorld(object):
         :return: true if position is inside the world
         :rtype: boolean
         """
-        # Set return value to true at the beginning
-        ret = 1
-        # Iterate over everything coordinate of the position, while sinchronously iterating over limits of the world
-        # (zip interates over both iterables in a synchronous way)
-        for x, (mn, mx) in zip(pos, self.LIMIT):
-            # Check if current coordinate is inside the related world limits and bitwise and the result of this
-            # operation with the current value of the return value
-            ret &= int(mn <= x <= mx)
-        return bool(ret)
+        # # Set return value to true at the beginning
+        # ret = 1
+        # # Iterate over everything coordinate of the position, while sinchronously iterating over limits of the world
+        # # (zip interates over both iterables in a synchronous way)
+        # for x, (mn, mx) in zip(pos, self.LIMIT):
+        #     # Check if current coordinate is inside the related world limits and bitwise and the result of this
+        #     # operation with the current value of the return value
+        #     ret &= int(mn <= x <= mx)
+        # return bool(ret)
+        ind = self.pos_to_ind(pos)
+        return self.is_free_ind(ind)
 
     def __and__(self, other):
         """
@@ -450,8 +453,12 @@ class AStarPlanner(object):
         """
         Function to retrieve the path from the init node to the goal 
         """
-        final_node = self._run(init_pos, goal_pos)
-        path = list(map(lambda n: n.pos, final_node.family_tree()))
-        return path
+        try:
+            final_node = self._run(init_pos, goal_pos)
+            path = list(map(lambda n: n.pos, final_node.family_tree()))
+        except Exception:
+            path = []
+        finally:
+            return path
 
 
