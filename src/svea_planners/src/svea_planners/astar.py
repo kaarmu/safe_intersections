@@ -170,7 +170,7 @@ class AStarWorld(object):
     # World as an occupancy grid
     _occupancy_grid = None
 
-    def __init__(self, delta=None, limit=None, obstacles=None, obs_margin=0):
+    def __init__(self, delta=None, limit=None, obstacles=None, obs_margin=0, occ_grid=None):
         """
         Init method for AStarWorld class
 
@@ -187,6 +187,8 @@ class AStarWorld(object):
         self.DELTA = np.asarray(delta or self.DELTA)
         # 4 cells that represent the 4 corners of the world (list of lists indicating the extreme points of the map)
         self.LIMIT = np.asarray(limit or self.LIMIT)
+        if occ_grid is not None:
+            self._occupancy_grid = occ_grid
         # Obstacle list (if obstacles exists then self.OBS = obstacles, otherwise self.OBS = self.OBS, which is None at init)
         if obstacles is not None:
             self.OBS = obstacles

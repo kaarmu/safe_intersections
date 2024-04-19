@@ -268,11 +268,15 @@ class Server:
                                     latest_exit=latest_exit,
                                     corridor=corridor)
                 
+                flat_corridor = shp.project_onto(corridor, 1, 2) <= 0
+
                 resp.time_ref = time_ref.isoformat()
                 resp.earliest_entry = earliest_entry
                 resp.latest_entry = latest_entry
                 resp.earliest_exit = earliest_exit
                 resp.latest_exit = latest_exit
+                resp.shape = list(flat_corridor.shape)
+                resp.corridor = flat_corridor.tobytes()
                 resp.success = True
                 resp.reason = ''
 

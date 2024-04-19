@@ -169,6 +169,7 @@ class Vehicle:
         publish_initialpose(state)
 
         self.goto_waypoints = deque(maxlen=5)
+        self.paths = deque()
 
         ## Create simulators, models, managers, etc.
 
@@ -229,8 +230,32 @@ class Vehicle:
         start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
 
         if self.INIT_ENTRY:
-            self.init_entry(self.INIT_ENTRY, start_time)
 
+            # path to entry
+            time_ref = start_time
+            entry_loc = self.INIT_ENTRY
+            init_path = self.plan_to_location(entry_loc)
+            init_path_dist = pathlen(init_path)
+            earliest_entry = init_path_dist / self.MAX_VEL
+            latest_entry = init_path_dist / self.MIN_VEL
+            resp, exit_loc, outside_path, reentry_loc = self.plan_inside_outside(time_ref, entry_loc, earliest_entry, latest_entry)
+            
+            entry_time = datetime.fromisoformat(resp.time_ref) 
+            entry_time += timedelta(seconds=resp.earliest_entry+resp.latest_entry) / 2
+
+            init_vel = init_path_dist / (entry_time - start_time).total_seconds()
+            print('init_vel:', init_vel)
+            self.append_path(init_path, init_vel)
+
+            # entry to reentry
+            inside_init = self.LOCATION_COORDINATES[entry_loc]
+            inside_goal = self.LOCATION_COORDINATES[exit_loc]
+            inside_corridor = np.frombuffer(bytes(resp.corridor), bool).reshape(resp.shape)
+            inside_path = self.one_shot_plan(inside_init, inside_goal, ~inside_corridor)
+            self.append_path(inside_path)
+
+            self.append_path(outside_path)
+            
         if False:
             xy = (self.state.x, self.state.y)
             path = self.plan_to_location(xy, self.INIT_ENTRY)
@@ -285,36 +310,26 @@ class Vehicle:
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
         ], 10).registerCallback(state_cb)
 
-    def init_entry(self, entry_loc, start_dt=None):
-
-        if start_dt is None:
-            start_dt = datetime.now()
-
+    def plan_inside_outside(self, time_ref, entry_loc, earliest_entry, latest_entry):
         exit_loc = random.choice(self.INSIDE_ROUTES[entry_loc])
-        path = self.plan_to_location(entry_loc)
-        dist = pathlen(path)
 
         req = ReserveCorridor._request_class(
             name=self.NAME,
             entry=entry_loc,
             exit=exit_loc,
-            time_ref=start_dt.isoformat(),
-            earliest_entry=round(dist/self.MAX_VEL, 1),
-            latest_entry=round(dist/self.MIN_VEL, 1),
+            time_ref=time_ref.isoformat(),
+            earliest_entry=earliest_entry,
+            latest_entry=latest_entry,
         )
 
         t0 = time()
         resp = self.req_corridor(req)
         t1 = time()
 
+        outside_path, reentry_loc = self.plan_outside(exit_loc)
+        outside_dist = pathlen(outside_path)
+
         if self.DEBUG:
-            print('[path]')
-            print('state:', self.state.x, self.state.y)
-            print('goal:', *path[-1])
-            print('steps:', len(path))
-            print('dist:', dist)
-            print('earliest:', dist/self.MAX_VEL)
-            print('latest:', dist/self.MIN_VEL)
             print('[req]')
             print(req)
             print('[resp]')
@@ -322,8 +337,26 @@ class Vehicle:
             print('[time]')
             print('latency:', t1-t0)
             print('now:', datetime.now().isoformat())
+            print('[path]')
+            print('state:', self.state.x, self.state.y)
+            print('goal:', *outside_path[-1])
+            print('steps:', len(outside_path))
+            print('dist:', outside_dist)
+            print('earliest:', outside_dist/self.MAX_VEL)
+            print('latest:', outside_dist/self.MIN_VEL)
 
-        return resp, path
+        return resp, exit_loc, outside_path, reentry_loc
+
+    def plan_outside(self, entry_loc):
+        exit_loc = self.OUTSIDE_ROUTES[entry_loc]
+        entry_xy = self.LOCATION_COORDINATES[entry_loc]
+        exit_xy = self.LOCATION_COORDINATES[exit_loc]
+        path = self.planner.plan(entry_xy, exit_xy)
+        return path, exit_loc
+    
+    def one_shot_plan(self, init, goal, occ_grid):
+        planner = AStarPlanner(2.5 / 31, limit=[[-1.25, 1.25], [-1.25, 1.25]], occ_grid=occ_grid)        
+        return planner.plan(init, goal)
 
     def plan_to_goal(self, goal):
         init = self.state.x, self.state.y
@@ -341,13 +374,18 @@ class Vehicle:
         else:
             rospy.loginfo('Could not find a path to (%f, %f)', *goal)
         return path
-    
-    def follow_path(self, path):
+
+    def follow_path(self, path, vel=None):
         self.planning.set_points_path(path)
         self.planning.publish_path()
         self.controller.set_path(path)
-        self.controller.set_target_velocity(self.MED_VEL)
+        self.controller.set_target_velocity(self.MED_VEL if vel is None else vel)
         self.controller.is_finished = False
+    def append_path(self, *args, **kwds):
+        self.paths.append((args, kwds))
+    def next_path(self):
+        args, kwds = self.paths.popleft()
+        self.follow_path(*args, **kwds)
 
     def goto_next_waypoint(self):
         if self.goto_waypoints:
@@ -368,16 +406,30 @@ class Vehicle:
 
     def outside_spin(self):
 
-        if self.controller.is_finished:
-            self.goto_next_waypoint()
-
-        steering, velocity = self.controller.compute_control(self.state)
-        self.actuation.send_control(steering, velocity)
-
+        
         return False
 
     def run(self):
-        rospy.spin()
+
+        rate = rospy.Rate(10)
+
+        t0 = time()
+
+        while not rospy.is_shutdown() and not (self.controller.is_finished and not self.paths):
+
+            if self.controller.is_finished:
+                t1 = time()
+                print('path completed in:', t1 - t0)
+                self.next_path()
+                t0 = t1
+
+            steering, velocity = self.controller.compute_control(self.state)
+            self.actuation.send_control(steering, velocity)
+
+            rate.sleep()
+
+        print('finished')
+
 
 
 ### dirty tests
