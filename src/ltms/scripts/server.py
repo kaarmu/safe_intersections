@@ -8,13 +8,12 @@ from math import ceil, floor
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
+from contextlib import contextmanager
 
 import rospy
-from ltms.srv import ReserveCorridor
-from geometry_msgs.msg import PoseStamped
+from ltms.srv import ReserveCorridor, SafeInput
 
 import jax.numpy as jnp
-from nav_msgs.msg import OccupancyGrid
 
 import hj_reachability as hj
 import hj_reachability.shapes as shp
@@ -100,8 +99,8 @@ class Server:
 
         ## Create simulators, models, managers, etc.
 
-        self.min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0])
-        self.max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +1])
+        self.min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0.3])
+        self.max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +0.8])
         self.grid = hj.Grid.from_lattice_parameters_and_boundary_conditions(hj.sets.Box(self.min_bounds, self.max_bounds),
                                                                             (31, 31, 25, 7, 7),
                                                                             periodic_dims=2)
@@ -109,10 +108,12 @@ class Server:
         self.solver = Solver(grid=self.grid, 
                              time_step=self.TIME_STEP,
                              time_horizon=self.TIME_HORIZON,
-                             accuracy='low',
+                             accuracy='medium',
                              dynamics=dict(cls=hj.systems.SVEA5D,
-                                           min_steer=-jnp.pi, max_steer=+jnp.pi,
-                                           min_accel=-0.5, max_accel=+0.5),
+                                           min_steer=-jnp.pi * 5/4, 
+                                           max_steer=+jnp.pi * 5/4,
+                                           min_accel=-0.5, 
+                                           max_accel=+0.5),
                              interactive=False)
 
         self.environment = self.load_environment()
@@ -124,12 +125,13 @@ class Server:
         def clean_reservations_tmr(event):
             now = datetime.now().replace(microsecond=0)
             for id, reservation in self.get_reservations():
-                if reservation['origin_time'] + timedelta(seconds=self.TIME_HORIZON) < now:
+                if reservation['time_ref'] + timedelta(seconds=self.TIME_HORIZON) < now:
                     self.reservations.pop(id, None)
         rospy.Timer(rospy.Duration(1), clean_reservations_tmr)
 
         ## Advertise services
 
+        # rospy.Service('~save_input', SafeInput, self.safe_input_srv)
         rospy.Service('~request_corridor', ReserveCorridor, self.request_corridor_srv)
 
         ## Node initialized
@@ -156,7 +158,10 @@ class Server:
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         out = {}
         for (entry, exit), locs in self.PERMITTED_ROUTES.items():
-            filename = self.DATA_DIR / f'G{self.solver.code_grid}-T{self.solver.code_time}-pass1-{entry}-{exit}.npy'
+            code = (f'G{self.solver.code_grid}'
+                    f'D{self.solver.code_dynamics}'
+                    f'T{self.solver.code_time}')
+            filename = self.DATA_DIR / f'{code}-pass1-{entry}-{exit}.npy'
             if rospy.is_shutdown():
                 break
             elif filename.exists():
@@ -176,9 +181,10 @@ class Server:
         print('Offline analyses done.')
         return out
     
-    def get_reservations(self):
+    def get_reservations(self, unzip=False):
         with self.reservation_lock:
-            return list(self.reservations.items())
+            reservations = list(self.reservations.items())
+            return zip(*reservations) if unzip else reservations
     
     def add_resevation(self, id, **data):
         with self.reservation_lock:
@@ -191,9 +197,9 @@ class Server:
         resp.id = secrets.token_hex(4)
 
         try:
-            origin_time = datetime.fromisoformat(req.isotime)
+            time_ref = datetime.fromisoformat(req.time_ref)
         except Exception:
-            resp.reason = f"Malformed ISO time: '{req.isotime}'."
+            resp.reason = f"Malformed ISO time: '{req.time_ref}'."
             return
         
         if req.entry not in self.ENTRY_LOCATIONS:
@@ -206,93 +212,137 @@ class Server:
             resp.reason = f"Illegal route through region: '{req.entry}' -> '{req.exit}'."
             return
         
-        rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
+        @contextmanager
+        def logger_ctx():
+            rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
+            yield
+            if resp.success:
+                rospy.loginfo(f"Reservation {resp.id} ({req.name}) approved.")
+            else:
+                rospy.loginfo(f"Reservation {resp.id} ({req.name}) recjected: {resp.reason}")
         
-        try:
-            earliest_entry = round(req.earliest_entry, 1)
-            latest_entry = round(req.latest_entry, 1)
-            
-            offset = floor(earliest_entry) + (earliest_entry % self.TIME_STEP)
-            origin_time += timedelta(seconds=offset)
-            earliest_entry -= offset
-            latest_entry -= offset
-            assert 0 < earliest_entry, 'Negotiation Failed: Invalid window offsetting'
+        with logger_ctx():
+            try:
+                earliest_entry = round(req.earliest_entry, 1)
+                latest_entry = round(req.latest_entry, 1)
+                
+                offset = floor(earliest_entry) + (earliest_entry % self.TIME_STEP)
+                time_ref += timedelta(seconds=offset)
+                earliest_entry -= offset
+                latest_entry -= offset
+                assert 0 < earliest_entry, 'Negotiation Failed: Invalid window offsetting'
 
-            max_window_entry = min(latest_entry - earliest_entry, 
-                                   self.TIME_HORIZON - earliest_entry,
-                                   self.MAX_WINDOW_ENTRY)
-            max_window_entry = round(max_window_entry, 1)
-            assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
-            
-            dangers = self.find_dangers(origin_time)
-            output = self.solver.run_analysis('pass4',
-                                              max_window_entry=max_window_entry,
-                                              pass1=self.offline_passes[req.entry, req.exit],
-                                              entry=self.environment[req.entry],
-                                              exit=self.environment[req.exit],
-                                              dangers=dangers)
-            
-            earliest_entry = max(earliest_entry, output['earliest_entry'])
-            latest_entry = min(latest_entry, output['latest_entry'])
-            earliest_exit = output['earliest_exit']
-            latest_exit = output['latest_exit']
-            corridor = output['pass4']
-            assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
+                max_window_entry = min(latest_entry - earliest_entry, 
+                                    self.TIME_HORIZON - earliest_entry,
+                                    self.MAX_WINDOW_ENTRY)
+                max_window_entry = round(max_window_entry, 1)
+                assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
+                
+                dangers = self.find_dangers(time_ref)
+                output = self.solver.run_analysis('pass4',
+                                                max_window_entry=max_window_entry,
+                                                pass1=self.offline_passes[req.entry, req.exit],
+                                                entry=self.environment[req.entry],
+                                                exit=self.environment[req.exit],
+                                                dangers=dangers)
+                
+                earliest_entry = max(earliest_entry, output['earliest_entry'])
+                latest_entry = min(latest_entry, output['latest_entry'])
+                earliest_exit = output['earliest_exit']
+                latest_exit = output['latest_exit']
+                corridor = output['pass4']
+                assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
 
-        except AssertionError as e:
-            msg, = e.args
-            resp.reason = f'Reservation Error: {msg}'
-            return
-        else:
-            self.add_resevation(id=resp.id,
-                                origin_time=origin_time,
-                                name=req.name, 
-                                entry=req.entry, exit=req.exit,
-                                earliest_entry=earliest_entry,
-                                latest_entry=latest_entry,
-                                earliest_exit=earliest_exit,
-                                latest_exit=latest_exit,
-                                corridor=corridor)
-            
-            resp.isotime = origin_time.isoformat()
-            resp.earliest_entry = earliest_entry
-            resp.latest_entry = latest_entry
-            resp.earliest_exit = earliest_exit
-            resp.latest_exit = latest_exit
-            resp.success = True
-            resp.reason = ''
+            except AssertionError as e:
+                msg, = e.args
+                resp.reason = f'Reservation Error: {msg}'
+                return
+            else:
+                self.add_resevation(id=resp.id,
+                                    name=req.name, 
+                                    time_ref=time_ref,
+                                    entry=req.entry, exit=req.exit,
+                                    earliest_entry=earliest_entry,
+                                    latest_entry=latest_entry,
+                                    earliest_exit=earliest_exit,
+                                    latest_exit=latest_exit,
+                                    corridor=corridor)
+                
+                resp.time_ref = time_ref.isoformat()
+                resp.earliest_entry = earliest_entry
+                resp.latest_entry = latest_entry
+                resp.earliest_exit = earliest_exit
+                resp.latest_exit = latest_exit
+                resp.success = True
+                resp.reason = ''
 
-    def find_dangers(self, origin_time):
+    def find_dangers(self, time_ref):
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
         dangers = []
         
         for id, reservation in self.get_reservations():
-            earliest_overlap = max(origin_time, reservation['origin_time'])
-            latest_overlap = min(origin_time + td_horizon, reservation['origin_time'] + td_horizon)
+            earliest_overlap = max(time_ref, reservation['time_ref'])
+            latest_overlap = min(time_ref + td_horizon, reservation['time_ref'] + td_horizon)
             overlap = (latest_overlap - earliest_overlap).total_seconds()
 
             if not 0 < overlap:
                 continue
             
             danger = np.ones(self.grid.shape)
-            if origin_time < earliest_overlap:
+            if time_ref < earliest_overlap:
                 #  red:     [-----j----]
                 # blue: [---i-----]
-                i_offset = (earliest_overlap - origin_time).total_seconds()
-                j_offset = (latest_overlap - reservation['origin_time']).total_seconds()
+                i_offset = (earliest_overlap - time_ref).total_seconds()
+                j_offset = (latest_overlap - reservation['time_ref']).total_seconds()
                 i = ceil(i_offset / self.TIME_STEP)
                 j = ceil(j_offset / self.TIME_STEP)
                 danger[i:] = reservation['corridor'][:j]
             else: 
                 #  red: [---i-----]
                 # blue:     [-----j----]
-                i_offset = (earliest_overlap - reservation['origin_time']).total_seconds()
-                j_offset = (latest_overlap - origin_time).total_seconds()
+                i_offset = (earliest_overlap - reservation['time_ref']).total_seconds()
+                j_offset = (latest_overlap - time_ref).total_seconds()
                 i = ceil(i_offset / self.TIME_STEP)
                 j = ceil(j_offset / self.TIME_STEP)
                 danger[:j] = reservation['corridor'][i:]
             dangers.append(danger)
         return dangers
+
+    @service(SafeInput)
+    def safe_input_srv(self, req, resp):
+        resp.success = False
+        resp.reason = 'Unknown.'
+        
+        try:
+            time_ref = datetime.fromisoformat(req.time_ref)
+        except Exception:
+            resp.reason = f"Malformed ISO time: '{req.time_ref}'."
+            return
+        
+        for id, reservation in self.get_reservations():
+            if req.id == id: break
+        else:
+            resp.reason = f'Unknown reservation {req.id}'
+            return
+        
+        idx = (np.array([req.x, req.y, req.a]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
+        idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
+        idx = np.round(idx).astype(int)
+
+        if (idx < 0).any() or (self.grid.shape[:3] <= idx).any():
+            resp.reason = 'Outside grid'
+            return
+        
+        ix, iy, ia = idx
+        vf = reservation['corridor'][0:2, ix-1:ix+2, iy-1:iy+2, ia-1:ia+1, :, :]
+        vf = shp.project_onto(vf, 0, 4, 5)
+        vf = vf.max(axis=0)
+        id, iv = np.unravel_index(vf.argmin(), vf.shape)
+
+        resp.steering = self.grid.coordinate_vectors[4][id]
+        resp.velocity = self.grid.coordinate_vectors[5][id]
+        resp.success = True
+
 
     def run(self):
         rospy.spin()

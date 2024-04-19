@@ -5,6 +5,8 @@ import random
 from time import time
 from collections import deque
 from datetime import datetime, timedelta
+from threading import Thread
+from queue import SimpleQueue
 
 # SVEA imports
 from svea.states import VehicleState
@@ -92,6 +94,23 @@ def pathlen(path):
         dist += np.hypot(nxt[0] - pnt[0], nxt[1] - pnt[1])
     return dist
 
+def service_like(f):
+    q = SimpleQueue()
+    def worker():
+        while not rospy.is_shutdown():
+            try:
+                item = q.get(timeout=1)
+            except Exception: pass
+            else:
+                args, kwds = item
+                f(*args, **kwds)
+    t = Thread(target=worker)
+    def wrapper(*args, **kwds):
+        q.put((args, kwds))
+        if not t.is_alive():
+            t.start()
+    return wrapper
+
 class Vehicle:
 
     DELTA_TIME = 0.1
@@ -123,6 +142,9 @@ class Vehicle:
 
     MAX_VEL = 0.8
     MIN_VEL = 0.4
+    MED_VEL = (MAX_VEL + MIN_VEL)/2
+
+    DEBUG = True
 
     def __init__(self):
 
@@ -204,17 +226,43 @@ class Vehicle:
 
         self.localization.block_until_state()
 
-        start_dt = datetime.now() + timedelta(seconds=self.INIT_WAIT)
+        start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
 
         if self.INIT_ENTRY:
-            self.init_entry(self.INIT_ENTRY, start_dt)
+            self.init_entry(self.INIT_ENTRY, start_time)
+
+        if False:
+            xy = (self.state.x, self.state.y)
+            path = self.plan_to_location(xy, self.INIT_ENTRY)
+            dist = pathlen(path)
+            
+            while not rospy.is_shutdown():
+                _ = self.sched_route(time_ref=start_time,
+                                     entry_loc=self.INIT_ENTRY,
+                                     earliest_entry=round(dist/self.MAX_VEL, 1),
+                                     latest_entry=round(dist/self.MIN_VEL, 1),
+                                     exit_loc=random.choice(self.INSIDE_ROUTES[self.INIT_ENTRY]))
+                if ...:
+                    break
+                else:
+                    start_time += timedelta(seconds=2)
         
         now = datetime.now()
-        while not rospy.is_shutdown() and now < start_dt:
+        while not rospy.is_shutdown() and now < start_time:
             rospy.sleep(0.02)
             now = datetime.now()
-            print(f'{(start_dt - now).total_seconds():0.02f} s left until start.', end='\r', flush=True)
+            print(f'{(start_time - now).total_seconds():0.02f} s left until start.', end='\r', flush=True)
         
+        def switching_worker():
+            rate = rospy.Rate(10)
+            switch = True
+            while not rospy.is_shutdown():
+                f = self.outside_spin if switch else self.inside_spin
+                switch ^= f()
+                rate.sleep()
+                
+        # Thread(target=switching_worker).start()
+
         print(f'Starting!'.ljust(25))
 
     def init_mocap(self):
@@ -237,16 +285,20 @@ class Vehicle:
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
         ], 10).registerCallback(state_cb)
 
-    def init_entry(self, entry_loc, start_dt):
+    def init_entry(self, entry_loc, start_dt=None):
+
+        if start_dt is None:
+            start_dt = datetime.now()
+
         exit_loc = random.choice(self.INSIDE_ROUTES[entry_loc])
         path = self.plan_to_location(entry_loc)
         dist = pathlen(path)
 
         req = ReserveCorridor._request_class(
             name=self.NAME,
-            isotime=start_dt.isoformat(),
             entry=entry_loc,
             exit=exit_loc,
+            time_ref=start_dt.isoformat(),
             earliest_entry=round(dist/self.MAX_VEL, 1),
             latest_entry=round(dist/self.MIN_VEL, 1),
         )
@@ -255,20 +307,23 @@ class Vehicle:
         resp = self.req_corridor(req)
         t1 = time()
 
-        print('[path]')
-        print('state:', self.state.x, self.state.y)
-        print('goal:', *path[-1])
-        print('steps:', len(path))
-        print('dist:', dist)
-        print('earliest:', dist/self.MAX_VEL)
-        print('latest:', dist/self.MIN_VEL)
-        print('[req]')
-        print(req)
-        print('[resp]')
-        print(resp)
-        print('[time]')
-        print('latency:', t1-t0)
-        print('now:', datetime.now().isoformat())
+        if self.DEBUG:
+            print('[path]')
+            print('state:', self.state.x, self.state.y)
+            print('goal:', *path[-1])
+            print('steps:', len(path))
+            print('dist:', dist)
+            print('earliest:', dist/self.MAX_VEL)
+            print('latest:', dist/self.MIN_VEL)
+            print('[req]')
+            print(req)
+            print('[resp]')
+            print(resp)
+            print('[time]')
+            print('latency:', t1-t0)
+            print('now:', datetime.now().isoformat())
+
+        return resp, path
 
     def plan_to_goal(self, goal):
         init = self.state.x, self.state.y
@@ -280,17 +335,20 @@ class Vehicle:
 
     def goto(self, goal):
         path = self.plan_to_goal(goal)
-        if not path:
-            rospy.loginfo('Could not find a path to (%f, %f)', *goal)
-        else:
-            self.planning.set_points_path(path)
-            self.planning.publish_path()
-            self.controller.set_path(path)
-            self.controller.set_target_velocity(0.8)
-            self.controller.is_finished = False
+        if path:
+            self.follow_path(path)
             rospy.loginfo("Going to (%f, %f)", *goal)
+        else:
+            rospy.loginfo('Could not find a path to (%f, %f)', *goal)
         return path
     
+    def follow_path(self, path):
+        self.planning.set_points_path(path)
+        self.planning.publish_path()
+        self.controller.set_path(path)
+        self.controller.set_target_velocity(self.MED_VEL)
+        self.controller.is_finished = False
+
     def goto_next_waypoint(self):
         if self.goto_waypoints:
             goal = self.goto_waypoints.popleft()
@@ -302,7 +360,13 @@ class Vehicle:
             rospy.loginfo("Waypoint not in world.")
         self.goto_waypoints.append(wayp)
         
-    def spin(self):
+    def inside_spin(self):
+        
+        # ask for lrcs
+        lrcs = ...
+        
+
+    def outside_spin(self):
 
         if self.controller.is_finished:
             self.goto_next_waypoint()
@@ -310,10 +374,10 @@ class Vehicle:
         steering, velocity = self.controller.compute_control(self.state)
         self.actuation.send_control(steering, velocity)
 
+        return False
+
     def run(self):
-        while not rospy.is_shutdown():
-            self.spin()
-            self.rate.sleep()
+        rospy.spin()
 
 
 ### dirty tests

@@ -1,6 +1,7 @@
 from time import time
 from math import ceil
 from struct import pack
+from functools import wraps
 
 import numpy as np
 import numpy.lib.stride_tricks as st
@@ -64,6 +65,13 @@ def new_timeline(target_time, start_time=0, time_step=0.2):
     time_step *= 1 if is_forward else -1
     return np.arange(start_time, target_time, time_step)
 
+def flatten(seq):
+    for itm in seq:
+        if isinstance(itm, type(seq)):
+            yield from itm
+        else:
+            yield itm
+
 class Solver:
 
     AVOID_MARGIN = 0
@@ -88,29 +96,51 @@ class Solver:
         bs = pack('ff', self.time_horizon, self.time_step)
         self.code_time = bytes([sum(bs) % 256]).hex()
 
-        bs = pack('i'*self.grid.ndim, *self.grid.shape)
+        bs = pack('s' + 'ffi'*self.grid.ndim,
+                  accuracy.encode(), 
+                  *flatten([[self.grid.domain.lo[i], self.grid.domain.hi[i], self.grid.shape[i]]
+                            for i in range(self.grid.ndim)]))
         self.code_grid = bytes([sum(bs) % 256]).hex()
 
-    def brs(self, times, target, constraints=None, *, mode='reach'):
-        dynamics = self.reach_dynamics if mode == 'reach' else self.avoid_dynamics
-        times = -np.asarray(times)
-        if not  shp.is_invariant(self.grid, times, target):
-            target = np.flip(target, axis=0)
-        if not shp.is_invariant(self.grid, times, constraints):
-            constraints = np.flip(constraints, axis=0)
-        values = hj.solve(self.solver_settings, dynamics, self.grid,
-                        times, target, constraints)
-        values = np.asarray(values)
-        values = np.flip(values, axis=0)
-        return values
+        bs = pack('ffff', 
+                  dynamics['min_steer'], dynamics['max_steer'], 
+                  dynamics['min_accel'], dynamics['max_accel'])
+        self.code_dynamics = bytes([sum(bs) % 256]).hex()
 
-    def frs(self, times, target, constraints=None, *, mode='avoid'):
-        times = np.asarray(times)
-        dynamics = self.reach_dynamics if mode == 'reach' else self.avoid_dynamics
-        values = hj.solve(self.solver_settings, dynamics, self.grid,
-                        times, target, constraints)
-        values = np.asarray(values)
-        return values
+    def brs(self, times, target, constraints=None, *, mode='reach', interactive=True):
+        jnp = hj.solver.jnp
+        times = -jnp.asarray(times)
+        target = jnp.asarray(target)
+        constraints = jnp.asarray(constraints)
+        if not  shp.is_invariant(self.grid, times, target):
+            target = jnp.flip(target, axis=0)
+        if not shp.is_invariant(self.grid, times, constraints):
+            constraints = jnp.flip(constraints, axis=0)
+        values = hj.solve(self.solver_settings, 
+                          (self.reach_dynamics if mode == 'reach' else 
+                           self.avoid_dynamics), 
+                          self.grid,
+                          times, 
+                          target, 
+                          constraints,
+                          progress_bar=interactive)
+        values = jnp.flip(values, axis=0)
+        return np.asarray(values)
+
+    def frs(self, times, target, constraints=None, *, mode='avoid', interactive=True):
+        jnp = hj.solver.jnp
+        times = jnp.asarray(times)
+        target = jnp.asarray(target)
+        constraints = jnp.asarray(constraints)
+        values = hj.solve(self.solver_settings,
+                          (self.reach_dynamics if mode == 'reach' else 
+                           self.avoid_dynamics),
+                          self.grid,
+                          times,
+                          target,
+                          constraints,
+                          progress_bar=interactive)
+        return np.asarray(values)
 
     def run_analysis(self, *passes, **kwargs):
         """
@@ -186,7 +216,7 @@ class Solver:
             constraints = rules
 
             start_time = time()
-            output = self.brs(self.timeline, target, constraints)
+            output = self.brs(self.timeline, target, constraints, interactive=interactive)
             stop_time = time()
 
             if interactive:
@@ -218,7 +248,7 @@ class Solver:
                     target[:-1] = end       # all other steps are recomputed to end
                     
                     start_time = time()
-                    output[:j+1] = self.brs(self.timeline[:j+1], target, constraints)
+                    output[:j+1] = self.brs(self.timeline[:j+1], target, constraints, interactive=interactive)
                     stop_time = time()
                 
                     if interactive:
@@ -248,7 +278,7 @@ class Solver:
             depart_target[j:] = 1
 
             start_time = time()
-            output[i:] = self.frs(self.timeline[i:], depart_target[i:], output[i:])
+            output[i:] = self.frs(self.timeline[i:], depart_target[i:], output[i:], interactive=interactive)
             output[:i] = 1 # Remove all values before departure
             stop_time = time()
 
@@ -256,6 +286,8 @@ class Solver:
                 print(f'Time To Compute: {stop_time - start_time:.02f}')
                 print(f'Earliest Departure: {self.timeline[i]:.01f}')
                 print(f'Latest Departure: {self.timeline[j-1]:.01f}')
+
+            np.save('/svea_ws/src/ltms/data/pass3.npy', output, allow_pickle=True)
 
             kwargs['pass3'] = output
             if 'pass3' in passes_out: out['pass3'] = output.copy()
@@ -281,7 +313,7 @@ class Solver:
             arrival_target[n:] = 1
 
             start_time = time()
-            output[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], output[i:n])
+            output[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], output[i:n], interactive=interactive)
             output[n:] = 1 # Remove all values after arrival
             stop_time = time()
 
@@ -421,3 +453,226 @@ def create_4way(grid, *envs):
 
 
     return {name: out[name] for name in envs_out}
+
+def setdefaults(kw, *args, **kwargs):
+    if len(args) == 0:
+        assert kwargs, 'Missing arguments'
+        defaults = kwargs
+    elif len(args) == 1:
+        defaults, = args
+        assert isinstance(defaults, dict), 'Single-argument form must be default dictionary'
+        assert not kwargs, 'Cannot supply keywords arguments with setdefault({...}) form'
+    elif len(args) == 2:
+        key, val = args
+        assert not kwargs, 'Cannot supply keywords arguments with setdefault(key, val) form'
+        defaults = {key: val}
+    for key, val in defaults.items():
+        kw.setdefault(key, val)
+
+if False:
+
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    REG = {}
+
+    min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0])
+    max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +1])
+    REG['extent'] = [min_bounds[0], max_bounds[0], min_bounds[1], max_bounds[1]]
+    REG['bgpath'] = str((Path(__file__) / '../../data/4way.png').resolve())
+
+    def auto_ax(f):
+        @wraps(f)
+        def wrapper(*args, ax: plt.Axes = None, **kwargs):
+            if ax is None:
+                _, ax = plt.subplots()
+            kwargs.update(ax=ax)
+            return f(*args, **kwargs)
+        return wrapper
+
+    @auto_ax
+    def plot_im(im, *, ax, transpose=True, **kwargs):
+        setdefaults(kwargs, cmap='Blues', aspect='auto')
+        if transpose:
+            im = np.transpose(im)
+        return [ax.imshow(im, origin='lower', **kwargs)]
+    
+    @auto_ax
+    def plot_levels(vf, *, ax, **kwargs):
+        return [ax.contourf(vf)]
+
+    @auto_ax
+    def plot_levelset(vf, **kwargs):
+        setdefaults(kwargs, aspect='equal')
+        vf = np.where(vf <= 0, 0.5, np.nan)
+        kwargs.update(vmin=0, vmax=1,)
+        return plot_im(vf, **kwargs)
+
+    @auto_ax
+    def plot_levelset_many(*vfs, **kwargs):
+        out = []
+        f = lambda itm: itm if isinstance(itm, tuple) else (itm, {})
+        for vf, kw in map(f, vfs):
+            out += plot_levelset(vf, **kw, **kwargs)
+        return out
+
+    def new_map(*vfs, **kwargs):
+        setdefaults(kwargs, 
+                    bgpath=REG.get('bgpath', None),
+                    alpha=0.9,
+                    extent=REG.get('extent', None))
+        fig, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
+        ax.set_ylabel("y [m]")
+        ax.set_xlabel("x [m]")
+        ax.invert_yaxis()
+        bgpath = kwargs.pop('bgpath')
+        if bgpath is not None:
+            ax.imshow(plt.imread(bgpath), extent=kwargs['extent'])
+        plot_levelset_many(*vfs, **kwargs, ax=ax)
+        fig.tight_layout()
+        return fig
+    
+    load_plot = lambda name, *args: new_map(shp.project_onto(np.load(name), *args)).show()
+
+    import plotly.graph_objects as go
+    import skimage.io as sio
+
+    def interact_tubes_time(times, *triplets, eye=None, grid_shape=None):
+        background = sio.imread(REG['bgpath'], as_gray=True)
+        background = np.flipud(background)
+
+        def render_frame(time_idx=None):
+            data = []
+
+            meshgrid = np.mgrid[times[0]:times[-1]:complex(0, len(times)),
+                                min_bounds[0]:max_bounds[0]:complex(0, grid_shape[0]), 
+                                min_bounds[1]:max_bounds[1]:complex(0, grid_shape[1])]
+            
+            data += [
+                go.Surface(
+                    x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
+                    y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
+                    z=times[0]*np.ones_like(background)-0.1,
+                    surfacecolor=background,
+                    colorscale='gray', 
+                    showscale=False,
+                ),
+            ]
+
+            for triplet in triplets:
+
+                colorscale, values = triplet[:2]
+                kwargs = triplet[2] if len(triplet) == 3 else {}
+
+                vf = shp.project_onto(values, 0, 1, 2)
+                if time_idx is not None and time_idx < len(times)-1:
+                    vf[time_idx+1:] = 1
+
+                data += [
+                    go.Isosurface(
+                        x=meshgrid[1].flatten(),
+                        y=meshgrid[2].flatten(),
+                        z=meshgrid[0].flatten(),
+                        value=vf.flatten(),
+                        colorscale=colorscale,
+                        showscale=False,
+                        isomin=0,
+                        surface_count=1,
+                        isomax=0,
+                        caps=dict(x_show=True, y_show=True),
+                        **kwargs,
+                    ),
+                ]
+            
+            fw = go.Figure(data=data)
+            fw.layout.update(width=720, height=720, 
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            #  legend=dict(yanchor='bottom', xanchor='left', x=0.05, y=0.05, font=dict(size=16)),
+                            scene=dict(xaxis_title='x [m]',
+                                        yaxis_title='y [m]',
+                                        zaxis_title='t [s]',
+                                        aspectratio=dict(x=1, y=3/4, z=3/4)),
+                            scene_camera=dict(eye=eye))
+            fw._config = dict(toImageButtonOptions=dict(height=720, width=720, scale=6))
+            return fw
+        return render_frame
+
+    def interact_tubes_axis(times, *triplets, axis=2, eye=None, grid_shape=None):
+        background = sio.imread(REG['bgpath'], as_gray=True)
+        background = np.flipud(background)
+
+        def render_frame(time_idx=None):
+            data = []
+
+            meshgrid = np.mgrid[min_bounds[0]:max_bounds[0]:complex(0, grid_shape[0]), 
+                                min_bounds[1]:max_bounds[1]:complex(0, grid_shape[1]),
+                                min_bounds[axis]:max_bounds[axis]:complex(0, grid_shape[axis])]
+            
+            data += [
+                go.Surface(
+                    x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
+                    y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
+                    z=min_bounds[axis]*np.ones_like(background)-0.1,
+                    surfacecolor=background,
+                    colorscale='gray', 
+                    showscale=False,
+                ),
+            ]
+
+            for triplet in triplets:
+
+                colorscale, values = triplet[:2]
+                kwargs = triplet[2] if len(triplet) == 3 else {}
+
+                axes = 1, 2, axis+1
+                vf = (shp.project_onto(values, *axes) if time_idx is None else
+                    shp.project_onto(values, 0, *axes)[time_idx])
+
+                data += [
+                    go.Isosurface(
+                        x=meshgrid[0].flatten(),
+                        y=meshgrid[1].flatten(),
+                        z=meshgrid[2].flatten(),
+                        value=vf.flatten(),
+                        colorscale=colorscale,
+                        showscale=False,
+                        isomin=0,
+                        surface_count=1,
+                        isomax=0,
+                        caps=dict(x_show=True, y_show=True),
+                        **kwargs,
+                    ),
+                ]
+            
+            fw = go.Figure(data=data)
+            fw.layout.update(width=720, height=720, 
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            #  legend=dict(yanchor='bottom', xanchor='left', x=0.05, y=0.05, font=dict(size=16)),
+                            scene=dict(xaxis_title='x [m]',
+                                        yaxis_title='y [m]',
+                                        zaxis_title=['Yaw [rad]', 'Delta [rad]', 'Vel [m/s]'][axis-2]),
+                            scene_camera=dict(eye=eye))
+            fw._config = dict(toImageButtonOptions=dict(height=720, width=720, scale=6))
+            return fw
+        return render_frame
+
+    def interact_tubes(*args, axis=None, **kwargs):
+        return (interact_tubes_time(*args, **kwargs) if axis is None else
+                interact_tubes_axis(*args, **kwargs, axis=axis))
+
+    def sphere_to_cartesian(r, theta, phi):
+        theta *= np.pi/180
+        phi *= np.pi/180
+        return dict(x=r*np.sin(theta)*np.cos(phi),
+                    y=r*np.sin(theta)*np.sin(phi),
+                    z=r*np.cos(theta))
+
+    EYE_W   = sphere_to_cartesian(2.2, 45, -90 - 90)
+    EYE_WSW = sphere_to_cartesian(2.2, 70, -90 - 70)
+    EYE_SW  = sphere_to_cartesian(2.5, 60, -90 - 45)
+    EYE_SSW = sphere_to_cartesian(2.2, 70, -90 - 20)
+    EYE_S   = sphere_to_cartesian(2.5, 45, -90 + 0)
+    EYE_SSE = sphere_to_cartesian(2.2, 70, -90 + 20)
+    EYE_SE  = sphere_to_cartesian(2.5, 60, -90 + 45)
+    EYE_ESE = sphere_to_cartesian(2.2, 70, -90 + 70)
+    EYE_E   = sphere_to_cartesian(2.2, 45, -90 + 90)

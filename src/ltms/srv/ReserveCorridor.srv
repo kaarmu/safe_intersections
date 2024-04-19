@@ -1,14 +1,14 @@
 string name
-string isotime
 string entry
 string exit
+string time_ref
 float32 earliest_entry
 float32 latest_entry
 ---
 bool success
 string reason
 string id
-string isotime
+string time_ref
 float32 earliest_entry
 float32 latest_entry
 float32 earliest_exit
