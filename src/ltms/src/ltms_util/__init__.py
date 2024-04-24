@@ -102,9 +102,10 @@ class Solver:
                             for i in range(self.grid.ndim)]))
         self.code_grid = bytes([sum(bs) % 256]).hex()
 
-        bs = pack('ffff', 
-                  dynamics['min_steer'], dynamics['max_steer'], 
-                  dynamics['min_accel'], dynamics['max_accel'])
+        bs = bytes()
+        bs += pack('sx', cls.__name__.encode())
+        for key, val in dynamics.items():
+            bs += pack('sxf', key.encode(), val)
         self.code_dynamics = bytes([sum(bs) % 256]).hex()
 
     def brs(self, times, target, constraints=None, *, mode='reach', interactive=True):
@@ -307,7 +308,7 @@ class Solver:
             arrival_window = earliest_window(shp.project_onto(arrival_target, 0) <= 0, min_nsteps)
             assert arrival_window.size > 0, 'Analysis Failed: No time window to exit region'
             w0 = 0
-            wn = min(max_nsteps+1, len(depart_window)-1)
+            wn = min(max_nsteps+1, len(arrival_window)-1)
             m = arrival_window[w0] # Earliest exit index
             n = arrival_window[wn] # Latest exit index
             arrival_target[n:] = 1
@@ -469,16 +470,24 @@ def setdefaults(kw, *args, **kwargs):
     for key, val in defaults.items():
         kw.setdefault(key, val)
 
-if False:
+import sys
+if sys.version_info.minor >= 10:
 
     from pathlib import Path
     import matplotlib.pyplot as plt
 
     REG = {}
 
-    min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0])
-    max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +1])
-    REG['extent'] = [min_bounds[0], max_bounds[0], min_bounds[1], max_bounds[1]]
+    REG['min_bounds'] = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0])
+    REG['max_bounds'] = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +1])
+    REG['grid_shape'] = (31, 31, 25, 7, 7)
+
+    REG['min_bounds'] = np.array([-1.2, -1.2, -np.pi, +0])
+    REG['max_bounds'] = np.array([+1.2, +1.2, +np.pi, +1])
+    REG['grid_shape'] = (31, 31, 25, 7)
+
+    REG['extent'] = [REG['min_bounds'][0], REG['max_bounds'][0], 
+                     REG['min_bounds'][1], REG['max_bounds'][1]]
     REG['bgpath'] = str((Path(__file__) / '../../data/4way.png').resolve())
 
     def auto_ax(f):
@@ -515,6 +524,43 @@ if False:
         for vf, kw in map(f, vfs):
             out += plot_levelset(vf, **kw, **kwargs)
         return out
+    
+    @auto_ax
+    def plot_tlrc(vf, **kwargs):
+        print('Assumes Bicycle4D')
+        dt = 0.2
+        shape = 31, 31, 25, 7
+        x, y, h, v = np.meshgrid(*[np.linspace(min_bounds[i], max_bounds[i], shape[i])
+                                   for i in range(4)])
+        f = np.array([
+            v * np.cos(h),
+            v * np.sin(h),
+            np.zeros_like(h),
+            np.zeros_like(v),
+        ])
+
+        g = np.array([
+            [0],
+            [0],
+            [0],
+            [1],
+        ])
+
+        out = []
+
+        n = vf.shape[0]
+        for i in range(n):
+            idx = np.where(vf[i] <= 0)
+            dvdx = np.array(np.gradient(vf[i]))[(...,) + idx]
+
+            a = vf[i][idx] + dt*np.sum(dvdx * f[(...,) + idx], axis=0)
+            b = (g.T @ dvdx)
+
+            im = a + b * np.linspace(-0.4, 0.4) <= 0
+            im.logic
+            # out += plot_im(, **kwargs)
+
+        return out 
 
     def new_map(*vfs, **kwargs):
         setdefaults(kwargs, 
@@ -537,9 +583,66 @@ if False:
     import plotly.graph_objects as go
     import skimage.io as sio
 
-    def interact_tubes_time(times, *triplets, eye=None, grid_shape=None):
-        background = sio.imread(REG['bgpath'], as_gray=True)
-        background = np.flipud(background)
+    def add_surface(*args, **kwargs):
+        setdefaults(kwargs,
+                    axes=(0, 1, 2),
+                    min_bounds=REG.get('min_bounds', None),
+                    max_bounds=REG.get('max_bounds', None),
+                    grid_shape=REG.get('grid_shape', None),
+                    colorscale='blues')
+
+        axes = kwargs.pop('axes')
+        max_bounds = kwargs.pop('max_bounds', None)
+        min_bounds = kwargs.pop('min_bounds', None)
+        grid_shape = kwargs.pop('grid_shape', None)
+
+        setdefaults(kwargs,
+                    {name: np.linspace(min_bounds[i], max_bounds[i], grid_shape[i])
+                     for i, name in zip(axes, 'xs ys zs'.split())})
+
+        xs, ys, zs = [kwargs.pop(name) for name in 'xs ys zs'.split()]
+
+        data = []
+
+        f = lambda itm: itm if isinstance(itm, (tuple, list)) else (itm, {})
+        for vf, kw in map(f, args):
+            setdefaults(kw, **kwargs)
+
+            data += [
+                go.Isosurface(
+                    x=xs, y=ys, z=zs,
+                    value=shp.project_onto(vf, *map(lambda v: v+1, axes)).flatten(),
+                    showscale=False,
+                    isomin=0,
+                    surface_count=1,
+                    isomax=0,
+                    caps=dict(x_show=True, y_show=True),
+                    **kw,
+                ),
+            ]
+        
+        return data
+
+    def interact_tubes_time(times, *triplets, **kwargs):
+        setdefaults(kwargs,
+                    eye=None,
+                    bgpath=REG.get('bgpath', None),
+                    min_bounds=REG.get('min_bounds', None),
+                    max_bounds=REG.get('max_bounds', None),
+                    grid_shape=REG.get('grid_shape', None))
+
+        eye = kwargs['eye']
+        bgpath = kwargs['bgpath']
+        min_bounds = kwargs['min_bounds']
+        max_bounds = kwargs['max_bounds']
+        grid_shape = kwargs['grid_shape']
+        assert grid_shape is not None
+
+        if bgpath is not None:
+            background = sio.imread(kwargs['bgpath'], as_gray=True)
+            background = np.flipud(background)
+        
+        bgaspect = (max_bounds[0]-min_bounds[0])/(max_bounds[1]-min_bounds[1])
 
         def render_frame(time_idx=None):
             data = []
@@ -548,16 +651,17 @@ if False:
                                 min_bounds[0]:max_bounds[0]:complex(0, grid_shape[0]), 
                                 min_bounds[1]:max_bounds[1]:complex(0, grid_shape[1])]
             
-            data += [
-                go.Surface(
-                    x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
-                    y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
-                    z=times[0]*np.ones_like(background)-0.1,
-                    surfacecolor=background,
-                    colorscale='gray', 
-                    showscale=False,
-                ),
-            ]
+            if bgpath is not None:
+                data += [
+                    go.Surface(
+                        x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
+                        y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
+                        z=times[0]*np.ones_like(background)-0.1,
+                        surfacecolor=background,
+                        colorscale='gray', 
+                        showscale=False,
+                    ),
+                ]
 
             for triplet in triplets:
 
@@ -585,48 +689,73 @@ if False:
                 ]
             
             fw = go.Figure(data=data)
-            fw.layout.update(width=720, height=720, 
+            fw.layout.update(# width=720, height=720, 
                             margin=dict(l=10, r=10, t=10, b=10),
                             #  legend=dict(yanchor='bottom', xanchor='left', x=0.05, y=0.05, font=dict(size=16)),
                             scene=dict(xaxis_title='x [m]',
                                         yaxis_title='y [m]',
                                         zaxis_title='t [s]',
-                                        aspectratio=dict(x=1, y=3/4, z=3/4)),
+                                        aspectratio=dict(x=bgaspect, y=1, z=3/4)),
                             scene_camera=dict(eye=eye))
             fw._config = dict(toImageButtonOptions=dict(height=720, width=720, scale=6))
             return fw
         return render_frame
 
-    def interact_tubes_axis(times, *triplets, axis=2, eye=None, grid_shape=None):
-        background = sio.imread(REG['bgpath'], as_gray=True)
-        background = np.flipud(background)
+    def interact_tubes_axis(times, *triplets, **kwargs):
+        setdefaults(kwargs,
+                    eye=None,
+                    xaxis=0, yaxis=1, zaxis=2,
+                    bgpath=REG.get('bgpath', None),
+                    min_bounds=REG.get('min_bounds', None),
+                    max_bounds=REG.get('max_bounds', None),
+                    grid_shape=REG.get('grid_shape', None))
+
+        eye = kwargs['eye']
+        min_bounds = kwargs['min_bounds']
+        max_bounds = kwargs['max_bounds']
+        grid_shape = kwargs['grid_shape']
+        assert grid_shape is not None
+
+        bgaspect = (max_bounds[0]-min_bounds[0])/(max_bounds[1]-min_bounds[1])
+
+        bgpath = kwargs['bgpath']
+        if bgpath is not None:
+            background = sio.imread(kwargs['bgpath'], as_gray=True)
+            background = np.flipud(background)
+
+        xaxis, yaxis, zaxis = kwargs['xaxis'], kwargs['yaxis'], kwargs['zaxis']
+        proj_target = [i for i in (xaxis, yaxis, zaxis) if isinstance(i, int)]
+        if isinstance(xaxis, int):
+            xaxis = np.linspace(min_bounds[xaxis], max_bounds[xaxis], grid_shape[xaxis])
+        if isinstance(yaxis, int):
+            yaxis = np.linspace(min_bounds[yaxis], max_bounds[yaxis], grid_shape[yaxis])    
+        if isinstance(zaxis, int):
+            zaxis = np.linspace(min_bounds[zaxis], max_bounds[zaxis], grid_shape[zaxis])    
 
         def render_frame(time_idx=None):
             data = []
 
-            meshgrid = np.mgrid[min_bounds[0]:max_bounds[0]:complex(0, grid_shape[0]), 
-                                min_bounds[1]:max_bounds[1]:complex(0, grid_shape[1]),
-                                min_bounds[axis]:max_bounds[axis]:complex(0, grid_shape[axis])]
+            meshgrid = np.meshgrid(xaxis, yaxis, zaxis)
             
-            data += [
-                go.Surface(
-                    x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
-                    y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
-                    z=min_bounds[axis]*np.ones_like(background)-0.1,
-                    surfacecolor=background,
-                    colorscale='gray', 
-                    showscale=False,
-                ),
-            ]
+            if bgpath is not None:
+                data += [
+                    go.Surface(
+                        x=np.linspace(min_bounds[0], max_bounds[0], background.shape[1]),
+                        y=np.linspace(min_bounds[1], max_bounds[1], background.shape[0]),
+                        z=zaxis.min()*np.ones_like(background)-0.1,
+                        surfacecolor=background,
+                        colorscale='gray', 
+                        showscale=False,
+                    ),
+                ]
 
             for triplet in triplets:
 
                 colorscale, values = triplet[:2]
                 kwargs = triplet[2] if len(triplet) == 3 else {}
 
-                axes = 1, 2, axis+1
-                vf = (shp.project_onto(values, *axes) if time_idx is None else
-                    shp.project_onto(values, 0, *axes)[time_idx])
+                vf = (shp.project_onto(values, *proj_target) if time_idx is None else
+                    shp.project_onto(values, 0, *proj_target)[time_idx])
 
                 data += [
                     go.Isosurface(
@@ -649,8 +778,9 @@ if False:
                             margin=dict(l=10, r=10, t=10, b=10),
                             #  legend=dict(yanchor='bottom', xanchor='left', x=0.05, y=0.05, font=dict(size=16)),
                             scene=dict(xaxis_title='x [m]',
-                                        yaxis_title='y [m]',
-                                        zaxis_title=['Yaw [rad]', 'Delta [rad]', 'Vel [m/s]'][axis-2]),
+                                       yaxis_title='y [m]',
+                                       zaxis_title=['Yaw [rad]', 'Delta [rad]', 'Vel [m/s]', 'FIXME'][-1],
+                                       aspectratio=dict(x=bgaspect, y=1, z=3/4)),
                             scene_camera=dict(eye=eye))
             fw._config = dict(toImageButtonOptions=dict(height=720, width=720, scale=6))
             return fw
@@ -666,6 +796,53 @@ if False:
         return dict(x=r*np.sin(theta)*np.cos(phi),
                     y=r*np.sin(theta)*np.sin(phi),
                     z=r*np.cos(theta))
+    
+    def extended_plot():
+        import json
+        from datetime import datetime
+
+        svea0 = np.load('../data/svea0.npy', allow_pickle=True)
+        svea1 = np.load('../data/svea1.npy', allow_pickle=True)
+        svea2 = np.load('../data/svea2.npy', allow_pickle=True)
+        with open('../data/svea0.json') as f: svea0_time = datetime.fromisoformat(json.load(f)['time_ref'])
+        with open('../data/svea1.json') as f: svea1_time = datetime.fromisoformat(json.load(f)['time_ref'])
+        with open('../data/svea2.json') as f: svea2_time = datetime.fromisoformat(json.load(f)['time_ref'])
+        diff = (svea2_time - svea0_time).total_seconds()
+        n = int(np.ceil(diff / 0.2))
+        timeline = new_timeline(0.2*n + 5)
+        svea0_full = np.ones(timeline.shape + svea0.shape[1:])
+        svea1_full = np.ones(timeline.shape + svea1.shape[1:])
+        svea2_full = np.ones(timeline.shape + svea2.shape[1:])
+        svea0_full[:26] = svea0
+        n = int(np.ceil((svea1_time - svea0_time).total_seconds() / 0.2))
+        svea1_full[n:n+26] = svea1
+        n = int(np.ceil((svea2_time - svea0_time).total_seconds() / 0.2))
+        svea2_full[n:n+26] = svea2
+        interact_tubes(timeline, ('blues', svea0_full), ('reds', svea1_full), ('purples', svea2_full))().write_html('plot.html')
+
+    def val2ind(x, axis, **kwargs):
+        setdefaults(kwargs,
+                    min_bounds=REG.get('min_bounds', None),
+                    max_bounds=REG.get('max_bounds', None),
+                    grid_shape=REG.get('grid_shape', None))
+        min_bounds = kwargs.pop('min_bounds')
+        max_bounds = kwargs.pop('max_bounds')
+        grid_shape = kwargs.pop('grid_shape')
+
+        dx = (max_bounds[axis] - min_bounds[axis]) / grid_shape[axis]
+        return round((x - min_bounds[axis]) / dx) - 1
+    
+    def ind2val(i, axis, **kwargs):
+        setdefaults(kwargs,
+                    min_bounds=REG.get('min_bounds', None),
+                    max_bounds=REG.get('max_bounds', None),
+                    grid_shape=REG.get('grid_shape', None))
+        min_bounds = kwargs.pop('min_bounds')
+        max_bounds = kwargs.pop('max_bounds')
+        grid_shape = kwargs.pop('grid_shape')
+
+        dx = (max_bounds[axis] - min_bounds[axis]) / grid_shape[axis]
+        return i*dx + min_bounds[axis]
 
     EYE_W   = sphere_to_cartesian(2.2, 45, -90 - 90)
     EYE_WSW = sphere_to_cartesian(2.2, 70, -90 - 70)

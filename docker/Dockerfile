@@ -34,6 +34,8 @@ RUN python3.9 -m pip install -U pip
 RUN python3.9 -m pip install --ignore-installed numpy matplotlib tqdm flax
 RUN python3.9 -m pip install -U --ignore-installed "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=.30
+
 # Run catkin build on workspace (improves build speeds later on).
 RUN catkin build
 

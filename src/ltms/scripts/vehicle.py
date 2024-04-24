@@ -129,6 +129,12 @@ class Vehicle:
         'entry_e': ['exit_s', 'exit_w', 'exit_n'],
     }
 
+    # Enable U-turns
+    INSIDE_ROUTES['entry_s'].append('exit_s')
+    INSIDE_ROUTES['entry_w'].append('exit_w')
+    INSIDE_ROUTES['entry_n'].append('exit_n')
+    INSIDE_ROUTES['entry_e'].append('exit_e')
+
     LOCATION_COORDINATES = {
         'entry_s': (+0.25, -1.00),
         'entry_w': (-1.00, -0.25),
@@ -238,8 +244,10 @@ class Vehicle:
             init_path_dist = pathlen(init_path)
             earliest_entry = init_path_dist / self.MAX_VEL
             latest_entry = init_path_dist / self.MIN_VEL
+            entry_loc = random.choice(list(self.INSIDE_ROUTES)) 
             resp, exit_loc, outside_path, reentry_loc = self.plan_inside_outside(time_ref, entry_loc, earliest_entry, latest_entry)
             
+            assert resp.success, 'Not successful planning'
             entry_time = datetime.fromisoformat(resp.time_ref) 
             entry_time += timedelta(seconds=resp.earliest_entry+resp.latest_entry) / 2
 
@@ -429,6 +437,7 @@ class Vehicle:
             rate.sleep()
 
         print('finished')
+        rospy.spin()
 
 
 

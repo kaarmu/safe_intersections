@@ -1,10 +1,12 @@
 import jax.numpy as jnp
 
-from hj_reachability import dynamics
-from hj_reachability import sets
+from .. import dynamics
+from .. import sets
+
+__all__ = ['Bicycle4D']
 
 
-class SVEA5D(dynamics.ControlAndDisturbanceAffineDynamics):
+class Bicycle4D(dynamics.Dynamics):
 
     def __init__(self,
                  min_steer, max_steer,
@@ -20,9 +22,9 @@ class SVEA5D(dynamics.ControlAndDisturbanceAffineDynamics):
         self.wheelbase = wheelbase
 
         if min_disturbances is None:
-            min_disturbances = [0] * 5
+            min_disturbances = [0] * 4
         if max_disturbances is None:
-            max_disturbances = [0] * 5
+            max_disturbances = [0] * 4
 
         if control_space is None:
             control_space = sets.Box(jnp.array([min_steer, min_accel]),
@@ -47,34 +49,37 @@ class SVEA5D(dynamics.ControlAndDisturbanceAffineDynamics):
         return self
 
     ## Dynamics
-    # Implements the affine dynamics 
-    #   `dx_dt = f(x, t) + G_u(x, t) @ u + G_d(x, t) @ d`.
-    # 
     #   x_dot = v * cos(yaw) + d_1
     #   y_dot = v * sin(yaw) + d_2
-    #   yaw_dot = (v * tan(delta))/L + d3
+    #   yaw_dot = (v * tan(u1))/L + d3
     #   delta_dot = u1 + d4
     #   v_dot = u2 + d5
-        
-
-    def open_loop_dynamics(self, state, time):
-        x, y, yaw, delta, vel = state
+    
+    def __call__(self, state, control, disturbance, time):
+        x, y, yaw, vel = state
+        steer, accel = control
         return jnp.array([
             vel * jnp.cos(yaw),
             vel * jnp.sin(yaw),
-            (vel * jnp.tan(delta))/self.wheelbase,
-            0.,
-            0.,
+            (vel * jnp.tan(steer))/self.wheelbase,
+            accel,
         ])
+    
+    def optimal_control_and_disturbance(self, state, time, grad_value):
+        # OBS: only when vel >= 0
 
-    def control_jacobian(self, state, time):
-        return jnp.array([
-            [0., 0.],
-            [0., 0.],
-            [0., 0.],
-            [1., 0.],
-            [0., 1.],
-        ])
+        if self.control_mode == 'max':
+            opt_ctrl = jnp.where(0 <= grad_value[2:], self.control_space.hi, self.control_space.lo)
+        else:
+            opt_ctrl = jnp.where(0 <= grad_value[2:], self.control_space.lo, self.control_space.hi)
 
-    def disturbance_jacobian(self, state, time):
-        return jnp.identity(5)
+        if self.disturbance_mode == 'max':
+            opt_dstb = jnp.where(0 <= grad_value, self.disturbance_space.hi, self.disturbance_space.lo)
+        else:
+            opt_dstb = jnp.where(0 <= grad_value, self.disturbance_space.lo, self.disturbance_space.hi)
+
+        return opt_ctrl, opt_dstb
+    
+    def partial_max_magnitudes(self, state, time, value, grad_value_box):
+        del value, grad_value_box # unused
+        return jnp.abs(self(state, self.control_space.max_magnitudes, self.disturbance_space.max_magnitudes, time))

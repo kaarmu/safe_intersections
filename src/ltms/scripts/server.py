@@ -3,7 +3,8 @@
 # Plain python imports
 import numpy as np
 import secrets
-from threading import Lock
+import json
+from threading import RLock
 from math import ceil, floor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,6 +82,12 @@ class Server:
         ('entry_e', 'exit_s'): ('road_w', 'road_s'),
         ('entry_e', 'exit_w'): ('road_w', 'road_w'),
         ('entry_e', 'exit_n'): ('road_w', 'road_n'),
+
+        # U-turns
+        ('entry_s', 'exit_s'): ('road_n', 'road_s'),
+        ('entry_w', 'exit_w'): ('road_e', 'road_w'),
+        ('entry_n', 'exit_n'): ('road_s', 'road_n'),
+        ('entry_e', 'exit_e'): ('road_w', 'road_e'),
     }
 
     def __init__(self):
@@ -99,17 +106,26 @@ class Server:
 
         ## Create simulators, models, managers, etc.
 
-        self.min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0.3])
-        self.max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +0.8])
+        if False:
+            self.min_bounds = np.array([-1.2, -1.2, -np.pi, -np.pi/5, +0.3])
+            self.max_bounds = np.array([+1.2, +1.2, +np.pi, +np.pi/5, +0.8])
+            self.grid_shape = (31, 31, 25, 7, 7)
+            self.model = hj.systems.Bicycle5D
+        else:
+            self.min_bounds = np.array([-1.2, -1.2, -np.pi, +0.3])
+            self.max_bounds = np.array([+1.2, +1.2, +np.pi, +0.8])
+            self.grid_shape = (31, 31, 25, 7)
+            self.model = hj.systems.Bicycle4D
+
         self.grid = hj.Grid.from_lattice_parameters_and_boundary_conditions(hj.sets.Box(self.min_bounds, self.max_bounds),
-                                                                            (31, 31, 25, 7, 7),
+                                                                            self.grid_shape,
                                                                             periodic_dims=2)
 
         self.solver = Solver(grid=self.grid, 
                              time_step=self.TIME_STEP,
                              time_horizon=self.TIME_HORIZON,
                              accuracy='medium',
-                             dynamics=dict(cls=hj.systems.SVEA5D,
+                             dynamics=dict(cls=self.model,
                                            min_steer=-jnp.pi * 5/4, 
                                            max_steer=+jnp.pi * 5/4,
                                            min_accel=-0.5, 
@@ -119,7 +135,7 @@ class Server:
         self.environment = self.load_environment()
         self.offline_passes = self.load_offline_analyses()
         
-        self.reservation_lock = Lock()
+        self.reservation_lock = RLock()
         self.reservations = {}
 
         def clean_reservations_tmr(event):
@@ -215,7 +231,8 @@ class Server:
         @contextmanager
         def logger_ctx():
             rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
-            yield
+            with self.reservation_lock: 
+                yield
             if resp.success:
                 rospy.loginfo(f"Reservation {resp.id} ({req.name}) approved.")
             else:
@@ -238,7 +255,7 @@ class Server:
                 max_window_entry = round(max_window_entry, 1)
                 assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
                 
-                dangers = self.find_dangers(time_ref)
+                dangers = self.resolve_danger(time_ref)
                 output = self.solver.run_analysis('pass4',
                                                 max_window_entry=max_window_entry,
                                                 pass1=self.offline_passes[req.entry, req.exit],
@@ -258,15 +275,15 @@ class Server:
                 resp.reason = f'Reservation Error: {msg}'
                 return
             else:
-                self.add_resevation(id=resp.id,
-                                    name=req.name, 
-                                    time_ref=time_ref,
-                                    entry=req.entry, exit=req.exit,
-                                    earliest_entry=earliest_entry,
-                                    latest_entry=latest_entry,
-                                    earliest_exit=earliest_exit,
-                                    latest_exit=latest_exit,
-                                    corridor=corridor)
+                meta = dict(id=resp.id,
+                            name=req.name, 
+                            time_ref=time_ref,
+                            entry=req.entry, exit=req.exit,
+                            earliest_entry=earliest_entry,
+                            latest_entry=latest_entry,
+                            earliest_exit=earliest_exit,
+                            latest_exit=latest_exit)
+                self.add_resevation(corridor=corridor, **meta)
                 
                 flat_corridor = shp.project_onto(corridor, 1, 2) <= 0
 
@@ -280,9 +297,16 @@ class Server:
                 resp.success = True
                 resp.reason = ''
 
-    def find_dangers(self, time_ref):
-        td_horizon = timedelta(seconds=self.TIME_HORIZON)
+                np.save(f'/svea_ws/src/ltms/data/{req.name}.npy', corridor, allow_pickle=True)
+                
+                meta['time_ref'] = time_ref.isoformat()
+                with open(f'/svea_ws/src/ltms/data/{req.name}.json', 'w') as f:
+                    json.dump(meta, f)
+
+    def resolve_danger(self, time_ref):
         dangers = []
+
+        td_horizon = timedelta(seconds=self.TIME_HORIZON)
         
         for id, reservation in self.get_reservations():
             earliest_overlap = max(time_ref, reservation['time_ref'])
@@ -292,7 +316,7 @@ class Server:
             if not 0 < overlap:
                 continue
             
-            danger = np.ones(self.grid.shape)
+            danger = np.ones(self.solver.timeline.shape + self.grid.shape)
             if time_ref < earliest_overlap:
                 #  red:     [-----j----]
                 # blue: [---i-----]
@@ -310,6 +334,10 @@ class Server:
                 j = ceil(j_offset / self.TIME_STEP)
                 danger[:j] = reservation['corridor'][i:]
             dangers.append(danger)
+
+        if not dangers:
+            rospy.loginfo('Intersection free!')
+
         return dangers
 
     @service(SafeInput)
