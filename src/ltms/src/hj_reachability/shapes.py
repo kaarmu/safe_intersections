@@ -56,6 +56,11 @@ def project_onto(vf, *idxs, keepdims=False):
     dims = [i for i in range(len(vf.shape)) if i not in idxs]
     return vf.min(axis=tuple(dims), keepdims=keepdims)
 
+def aproject_onto(vf, *idxs, keepdims=False):
+    idxs = [len(vf.shape) + i if i < 0 else i for i in idxs]
+    dims = [i for i in range(len(vf.shape)) if i not in idxs]
+    return vf.max(axis=tuple(dims), keepdims=keepdims)
+
 def hyperplane(grid: Grid, normal, offset, axes=None):
     """Creates an hyperplane implicit surface function
 

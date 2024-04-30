@@ -170,7 +170,9 @@ class Solver:
             - earliest_exit, latest_exit: if pass4 was computed
         """
 
+        debug = kwargs.pop('debug', False)
         interactive = kwargs.pop('interactive', self.is_interactive)
+
         min_window = kwargs.pop('min_window', 1)  # Need at least 1 second to enter/exit
         max_window = kwargs.pop('max_window', 2)  # Allow up to 2 seconds to enter/exit
         min_window_entry = kwargs.pop('min_window_entry', min_window)
@@ -184,7 +186,7 @@ class Solver:
             passes = ALL_PASSES
         passes = [name for name in ALL_PASSES if name in passes]
 
-        passes_out = list(passes)
+        passes_out = ALL_PASSES if debug else list(passes)
         out = {}
 
         for name in passes:
@@ -224,6 +226,7 @@ class Solver:
                 print(f'Time To Compute: {stop_time - start_time:.02f}')
             
             kwargs['pass1'] = output
+
             if 'pass1' in passes_out: out['pass1'] = output.copy()
 
         if 'pass2' in passes_sch:
@@ -258,6 +261,7 @@ class Solver:
                         print(f'Last Interaction: {self.timeline[j-1]:.01f}')
 
             kwargs['pass2'] = output
+
             if 'pass2' in passes_out: out['pass2'] = output.copy()
 
         if 'pass3' in passes_sch:
@@ -288,12 +292,13 @@ class Solver:
                 print(f'Earliest Departure: {self.timeline[i]:.01f}')
                 print(f'Latest Departure: {self.timeline[j-1]:.01f}')
 
-            np.save('/svea_ws/src/ltms/data/pass3.npy', output, allow_pickle=True)
-
             kwargs['pass3'] = output
-            if 'pass3' in passes_out: out['pass3'] = output.copy()
+            
             out['earliest_entry'] = self.timeline[i]
             out['latest_entry'] = self.timeline[j-1]
+            if 'pass3' in passes_out: out['pass3'] = output.copy()
+
+            if debug: out['depart_target'] = depart_target
 
         if 'pass4' in passes_sch:
             if interactive:
@@ -324,10 +329,13 @@ class Solver:
                 print(f'Latest Arrival: {self.timeline[n-1]:.01f}')
 
             kwargs['pass4'] = output
-            if 'pass4' in passes_out: out['pass4'] = output.copy()
+
             out['earliest_exit'] = self.timeline[m]
             out['latest_exit'] = self.timeline[n-1]
-        
+            if 'pass4' in passes_out: out['pass4'] = output.copy()
+
+            if debug: out['arrival_target'] = arrival_target
+
         return out
 
     def run_many(self, *objectives, **kwargs):
@@ -340,7 +348,7 @@ class Solver:
 def create_4way(grid, *envs):
     out = {}
 
-    X, Y, A, D, V = range(grid.ndim)
+    X, Y, A, V = range(grid.ndim)
 
     X0 = grid.domain.lo[X]
     Y0 = grid.domain.lo[Y]
@@ -349,6 +357,12 @@ def create_4way(grid, *envs):
     YN = grid.domain.hi[Y] - grid.domain.lo[Y]
 
     speedlimit = shp.rectangle(grid, axes=V, target_min=0.3, target_max=0.6)
+
+    if not envs:
+        envs += ('entry_n', 'entry_e', 'entry_s', 'entry_w')
+        envs += ('exit_n', 'exit_e', 'exit_s', 'exit_w')
+        envs += ('road_n', 'road_e', 'road_s', 'road_w')
+        envs += ('center',)
 
     envs_out = tuple(envs)
     envs_sch = tuple(envs)
@@ -494,13 +508,13 @@ if sys.version_info.minor >= 10:
         @wraps(f)
         def wrapper(*args, ax: plt.Axes = None, **kwargs):
             if ax is None:
-                _, ax = plt.subplots()
+                _, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
             kwargs.update(ax=ax)
             return f(*args, **kwargs)
         return wrapper
 
     @auto_ax
-    def plot_im(im, *, ax, transpose=True, **kwargs):
+    def plot_im(im, *, ax, transpose=False, **kwargs):
         setdefaults(kwargs, cmap='Blues', aspect='auto')
         if transpose:
             im = np.transpose(im)
@@ -508,12 +522,13 @@ if sys.version_info.minor >= 10:
     
     @auto_ax
     def plot_levels(vf, *, ax, **kwargs):
-        return [ax.contourf(vf)]
+        return [ax.contourf(vf, **kwargs)]
 
     @auto_ax
     def plot_levelset(vf, **kwargs):
-        setdefaults(kwargs, aspect='equal')
-        vf = np.where(vf <= 0, 0.5, np.nan)
+        setdefaults(kwargs, aspect='equal', cval=0.5)
+        cval = kwargs.pop('cval')
+        vf = np.where(vf <= 0, cval, np.nan)
         kwargs.update(vmin=0, vmax=1,)
         return plot_im(vf, **kwargs)
 
@@ -522,7 +537,8 @@ if sys.version_info.minor >= 10:
         out = []
         f = lambda itm: itm if isinstance(itm, tuple) else (itm, {})
         for vf, kw in map(f, vfs):
-            out += plot_levelset(vf, **kw, **kwargs)
+            setdefaults(kw, kwargs)
+            out += plot_levelset(vf, **kw)
         return out
     
     @auto_ax
@@ -574,7 +590,7 @@ if sys.version_info.minor >= 10:
         bgpath = kwargs.pop('bgpath')
         if bgpath is not None:
             ax.imshow(plt.imread(bgpath), extent=kwargs['extent'])
-        plot_levelset_many(*vfs, **kwargs, ax=ax)
+        plot_levelset_many(*vfs, **kwargs, ax=ax, transpose=True)
         fig.tight_layout()
         return fig
     
@@ -843,6 +859,339 @@ if sys.version_info.minor >= 10:
 
         dx = (max_bounds[axis] - min_bounds[axis]) / grid_shape[axis]
         return i*dx + min_bounds[axis]
+    
+    def create_simple_solver(**kwargs):
+        from pathlib import Path
+        import jax.numpy as jnp
+
+        TIME_STEP = kwargs.pop('time_step', 0.2)
+        TIME_HORIZON = kwargs.pop('time_horizon', 5)
+        MAX_WINDOW_ENTRY = kwargs.pop('max_window_entry', 2)
+        DATA_DIR = Path(kwargs.pop('data_dir', '../data')).resolve()
+
+        ENTRY_LOCATIONS = ['entry_s', 'entry_w', 'entry_n', 'entry_e']
+        EXIT_LOCATIONS = ['exit_s', 'exit_w', 'exit_n', 'exit_e']
+        LOCATIONS = [
+            'center',
+            'road_s', 'road_w', 'road_n', 'road_e',
+            *ENTRY_LOCATIONS,
+            *EXIT_LOCATIONS,
+        ]
+        PERMITTED_ROUTES = {
+            ('entry_s', 'exit_w'): ('road_n', 'road_w'),
+            ('entry_s', 'exit_n'): ('road_n', 'road_n'),
+            ('entry_s', 'exit_e'): ('road_n', 'road_e'),
+
+            ('entry_w', 'exit_n'): ('road_e', 'road_n'),
+            ('entry_w', 'exit_e'): ('road_e', 'road_e'),
+            ('entry_w', 'exit_s'): ('road_e', 'road_s'),
+
+            ('entry_n', 'exit_w'): ('road_s', 'road_w'),
+            ('entry_n', 'exit_s'): ('road_s', 'road_s'),
+            ('entry_n', 'exit_e'): ('road_s', 'road_e'),
+
+            ('entry_e', 'exit_s'): ('road_w', 'road_s'),
+            ('entry_e', 'exit_w'): ('road_w', 'road_w'),
+            ('entry_e', 'exit_n'): ('road_w', 'road_n'),
+
+            # U-turns
+            ('entry_s', 'exit_s'): ('road_n', 'road_s'),
+            ('entry_w', 'exit_w'): ('road_e', 'road_w'),
+            ('entry_n', 'exit_n'): ('road_s', 'road_n'),
+            ('entry_e', 'exit_e'): ('road_w', 'road_e'),
+        }
+        
+        min_bounds = np.array([-1.2, -1.2, -np.pi, +0.3])
+        max_bounds = np.array([+1.2, +1.2, +np.pi, +0.8])
+        grid_shape = (31, 31, 25, 7)
+        model = hj.systems.Bicycle4D
+
+        grid = hj.Grid.from_lattice_parameters_and_boundary_conditions(hj.sets.Box(min_bounds, max_bounds),
+                                                                       grid_shape,
+                                                                       periodic_dims=2)
+ 
+        solver = Solver(grid=grid,
+                        time_step=TIME_STEP,
+                        time_horizon=TIME_HORIZON,
+                        accuracy='medium',
+                        dynamics=dict(cls=model,
+                                      min_steer=-jnp.pi * 5/4,
+                                      max_steer=+jnp.pi * 5/4,
+                                      min_accel=-0.5,
+                                      max_accel=+0.5),
+                        interactive=True)
+        
+        env = {}
+        for loc in LOCATIONS:
+            filename = DATA_DIR / f'G{solver.code_grid}-{loc}.npy'
+            if filename.exists():
+                env[loc] = np.load(filename, allow_pickle=True)
+                print(f'Loading {filename}')
+            else:
+                env.update(create_4way(grid, loc))
+                print(f'Saving {filename}')
+                np.save(filename, env[loc], allow_pickle=True)
+        print('Environment done.')
+
+        routes = {}
+        for (entry, exit), locs in PERMITTED_ROUTES.items():
+            code = (f'G{solver.code_grid}'
+                    f'D{solver.code_dynamics}'
+                    f'T{solver.code_time}')
+            filename = DATA_DIR / f'{code}-pass1-{entry}-{exit}.npy'
+            if filename.exists():
+                print(f'Loading {filename}')
+                routes[entry, exit] = np.load(filename, allow_pickle=True)
+            else:
+                constraints = shp.union(*[env[loc] for loc in locs])
+
+                output = solver.run_analysis('pass1',
+                                             exit=env[exit],
+                                             constraints=constraints)
+                
+                print(f'Saving {filename}')
+                np.save(filename, output['pass1'], allow_pickle=True)
+                routes[entry, exit] = output['pass1']
+        print('Offline analyses done.')
+
+        def run(entry, exit, **kwargs):
+            setdefaults(kwargs,
+                        max_window_entry=MAX_WINDOW_ENTRY,
+                        pass1=routes[entry, exit],
+                        dangers=[])
+            return solver.run_analysis('pass4', entry=env[entry], exit=env[exit], **kwargs)
+        
+        return run
+    
+    def create_reservation_system(**kwargs):
+        setdefaults(kwargs,
+                    time_step=0.2,
+                    time_horizon=5,
+                    max_window_entry=2)
+        
+        from datetime import datetime, timedelta
+        from math import floor
+
+        simple_solver = create_simple_solver(**kwargs)
+
+        reservations = {}
+
+        TIME_STEP = kwargs.pop('time_step')
+        TIME_HORIZON = kwargs.pop('time_horizon')
+        MAX_WINDOW_ENTRY = kwargs.pop('max_window_entry')
+
+        def resolve_dangers(time_ref):
+            dangers = []
+
+            td_horizon = timedelta(seconds=TIME_HORIZON)
+            
+            for id, reservation in reservations.items():
+                earliest_overlap = max(time_ref, reservation['time_ref'])
+                latest_overlap = min(time_ref + td_horizon, reservation['time_ref'] + td_horizon)
+                overlap = (latest_overlap - earliest_overlap).total_seconds()
+
+                if not 0 < overlap:
+                    continue
+                
+                danger = np.ones((26, 31, 31, 25, 7))
+                if time_ref < earliest_overlap:
+                    #  red:     [-----j----]
+                    # blue: [---i-----]
+                    i_offset = (earliest_overlap - time_ref).total_seconds()
+                    j_offset = (latest_overlap - reservation['time_ref']).total_seconds()
+                    i = ceil(i_offset / TIME_STEP)
+                    j = ceil(j_offset / TIME_STEP)
+                    danger[i:] = reservation['corridor'][:j]
+                else: 
+                    #  red: [---i-----]
+                    # blue:     [-----j----]
+                    i_offset = (earliest_overlap - reservation['time_ref']).total_seconds()
+                    j_offset = (latest_overlap - time_ref).total_seconds()
+                    i = ceil(i_offset / TIME_STEP)
+                    j = ceil(j_offset / TIME_STEP)
+                    danger[:j] = reservation['corridor'][i:]
+                dangers.append(danger - 0.1)
+
+            if not dangers:
+                print('Intersection free!')
+
+            return dangers
+
+        def reserve(time_ref, entry, exit, earliest_entry=0.5, latest_entry=2.5, **kwargs):
+
+            try:
+                earliest_entry = round(earliest_entry, 1)
+                latest_entry = round(latest_entry, 1)
+                
+                offset = floor(earliest_entry) + (earliest_entry % TIME_STEP)
+                time_ref += timedelta(seconds=offset)
+                earliest_entry -= offset
+                latest_entry -= offset
+                assert 0 < earliest_entry, f'Negotiation Failed: Invalid window offsetting (offset={offset})'
+
+                max_window_entry = min(latest_entry - earliest_entry, 
+                                       TIME_HORIZON - earliest_entry,
+                                       MAX_WINDOW_ENTRY)
+                max_window_entry = round(max_window_entry, 1)
+                assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
+                
+                dangers = resolve_dangers(time_ref)
+                output = simple_solver(entry, exit, dangers=dangers, **kwargs)
+                
+                earliest_entry = max(earliest_entry, output['earliest_entry'])
+                latest_entry = min(latest_entry, output['latest_entry'])
+                earliest_exit = output['earliest_exit']
+                latest_exit = output['latest_exit']
+                corridor = output['pass4']
+                assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
+
+            except AssertionError as e:
+                msg, = e.args
+                return {'success': False, 'reason': f'Reservation Error: {msg}'}
+            else:
+                reservations[id] = dict(time_ref=time_ref,
+                                        entry=entry, exit=exit,
+                                        earliest_entry=earliest_entry,
+                                        latest_entry=latest_entry,
+                                        earliest_exit=earliest_exit,
+                                        latest_exit=latest_exit,
+                                        corridor=corridor)
+                
+                out = {}
+                out['id'] = id
+                out['time_ref'] = time_ref
+                out['analysis'] = output
+                out['success'] = True
+                out['reason'] = ''
+
+                return out
+            
+        def clean_from(time_ref):
+            for id, reservation in reservations.items():
+                if reservation['time_ref'] + timedelta(seconds=TIME_HORIZON) < time_ref:
+                    reservations.pop(id, None)
+
+        return reserve, clean_from
+    
+    def figs():
+        from datetime import datetime, timedelta
+        import matplotlib as mpl
+
+        mpl.rcParams.update(**{'font.size': 22})
+
+        now = datetime.now()
+
+        reserve, clean_from = create_reservation_system()
+
+        v1 = reserve(now, 'entry_s', 'exit_n', max_window=1)
+        assert v1['success'], v1['reason']
+
+        now += timedelta(seconds=0.9)
+
+        v2 = reserve(now, 'entry_w', 'exit_e', max_window=1, debug=True)
+        assert v2['success'], v2['reason']
+
+        diff = (v2['time_ref'] - v1['time_ref']).total_seconds()
+        n = int(np.ceil(diff / 0.2))
+        timeline = new_timeline(0.2*n + 5)
+        v1_part = v1['analysis']['pass4']
+        v2_part = v2['analysis']['pass4']
+        v1_full = np.ones(timeline.shape + v1_part.shape[1:])
+        v2_full = np.ones(timeline.shape + v2_part.shape[1:])
+        v1_full[0:0+26] = v1_part
+        v2_full[n:n+26] = v2_part
+
+        v2_depart   = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_arrival  = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_depart[n:n+26] = v2['analysis']['depart_target']
+        v2_arrival[n:n+26] = v2['analysis']['arrival_target']
+
+        v2_pass2 = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_pass2[n:n+26] = v2['analysis']['pass2']
+
+        def keep(vf, ax, lo, hi):
+            out = np.ones_like(vf)
+            idx = tuple(slice(lo, hi) if i == ax else slice(0, n)
+                        for i, n in enumerate(vf.shape))
+            out[idx] = vf[idx]
+            return out
+
+        interact_tubes(timeline, 
+                       ('reds', keep(v1_full, 2, 9, 12)), 
+                       ('greys', v2_pass2, dict(opacity=0.4)),
+                       ('blues', v2_full), 
+                       ('greens', v2_depart),
+                       ('greens', v2_arrival),
+                       bgpath='../data/4way.png')().write_html('plot.html')
+        
+        new_map(
+            (shp.project_onto(v1_full, 0, 1, 2)[14], dict(cmap='Reds')), 
+            (shp.project_onto(v2_full, 0,1,2)[14], dict(cmap='Blues')),
+            bgpath='../data/4way.png'
+        ).savefig('plot-xy.png')
+
+        fig, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
+        ax.set_xlabel('x [m]')
+        ax.set_ylabel('t [s]')
+        plot_levelset_many(
+            (shp.project_onto(v1_full[:,:,9:12], 0, 1), dict(cmap='Reds')),
+            (shp.project_onto(v2_pass2[:,:,9:12], 0, 1), dict(cmap='Greys', alpha=0.3)),
+            (shp.project_onto(v2_full[:,:,9:12], 0, 1), dict(cmap='Blues')),
+            (shp.project_onto(v2_depart[:,:,9:12], 0, 1), dict(cmap='Greens')),
+            (shp.project_onto(v2_arrival[:,:,9:12], 0, 1), dict(cmap='Greens')),
+            ax=ax, 
+            alpha=0.9, 
+            aspect=2.5/timeline.max(), 
+            extent=[-1.25, +1.25, 0, timeline.max()],
+        )
+        fig.tight_layout()
+        fig.savefig('plot-xt.png')
+
+        # x=-0.75, y=-0.25, h=0, v=?
+        ix = val2ind(-0.5, 0)
+        iy = val2ind(-0.25, 1)
+        ih = val2ind(0, 2)
+        # [13, ix, iy, ih, :]
+        vf = v2_full[14]
+        dt = 0.2
+        shape = 31, 31, 25, 7
+        x, y, h, v = np.meshgrid(*[np.linspace(REG['min_bounds'][i], REG['max_bounds'][i], shape[i])
+                                   for i in range(4)])
+        f = np.array([
+            v * np.cos(h),
+            v * np.sin(h),
+            np.zeros_like(h),
+            np.zeros_like(v),
+        ])
+        g = np.array([
+            [0],
+            [0],
+            [0],
+            [1],
+        ])
+        # idx = np.where(vf <= 0)
+        idx = (ix, iy, ih, slice(0, 7))
+        dvdx = np.array(np.gradient(vf))[(...,) + idx]
+
+        a = vf[idx] + dt*np.sum(dvdx * f[(...,) + idx], axis=0)
+        b = (g.T @ dvdx)
+        u = np.linspace(-0.4, 0.4, 25).reshape(len(b), -1)
+        lrcs = a.reshape(-1, 1) + b.T @ u
+
+        fig, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
+        ax.set_xlabel(r'Velocity [$m/s$]')
+        ax.set_ylabel(r'Acceleration [$m/s^2$]')
+        ax.set_ylim([-0.5, +0.5])
+        plot_levelset(lrcs, 
+                      ax=ax,
+                      transpose=True,
+                      cmap='Blues', cval=0.75,
+                      aspect=(REG['max_bounds'][3] - REG['min_bounds'][3]),
+                      extent=[REG['min_bounds'][3],
+                              REG['max_bounds'][3],
+                              -0.4, +0.4])
+        fig.tight_layout()
+        fig.savefig('plot-lrcs.png')
 
     EYE_W   = sphere_to_cartesian(2.2, 45, -90 - 90)
     EYE_WSW = sphere_to_cartesian(2.2, 70, -90 - 70)

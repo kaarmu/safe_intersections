@@ -255,7 +255,7 @@ class Server:
                 max_window_entry = round(max_window_entry, 1)
                 assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
                 
-                dangers = self.resolve_danger(time_ref)
+                dangers = self.resolve_dangers(time_ref)
                 output = self.solver.run_analysis('pass4',
                                                 max_window_entry=max_window_entry,
                                                 pass1=self.offline_passes[req.entry, req.exit],
@@ -303,7 +303,7 @@ class Server:
                 with open(f'/svea_ws/src/ltms/data/{req.name}.json', 'w') as f:
                     json.dump(meta, f)
 
-    def resolve_danger(self, time_ref):
+    def resolve_dangers(self, time_ref):
         dangers = []
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
