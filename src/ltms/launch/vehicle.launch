@@ -10,14 +10,15 @@
     <arg name="initial_pose_y" default="-1.64422277"/>
     <arg name="initial_pose_a" default="1.57" /> <!-- wrt to map-->
 
-    <arg name="use_foxglove"    default="true"/>
-
-    <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
+    <arg name="use_foxglove"    default="false"/>
 
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
         <arg name="port" value="8765" />
     </include>
+
+    <!-- Start map_server -->
+    <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
     <!-- Start vehicle node -->
     <node name="$(arg name)" pkg="ltms" type="vehicle.py" output="screen">

@@ -3,12 +3,15 @@
 
     <!-- Launch arguments -->
     <arg name="name"          default="svea0"/>
-    <arg name="use_foxglove"  default="false"/>
+    <arg name="use_foxglove"  default="true"/>
 
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
         <arg name="port" value="8765" />
     </include>
+
+    <!-- Start map_server -->
+    <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
     <!-- Start server node -->
     <node name="ltms" pkg="ltms" type="server.py" output="screen">

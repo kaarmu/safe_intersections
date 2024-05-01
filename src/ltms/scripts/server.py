@@ -297,11 +297,11 @@ class Server:
                 resp.success = True
                 resp.reason = ''
 
-                np.save(f'/svea_ws/src/ltms/data/{req.name}.npy', corridor, allow_pickle=True)
+                # np.save(f'/svea_ws/src/ltms/data/{req.name}.npy', corridor, allow_pickle=True)
                 
-                meta['time_ref'] = time_ref.isoformat()
-                with open(f'/svea_ws/src/ltms/data/{req.name}.json', 'w') as f:
-                    json.dump(meta, f)
+                # meta['time_ref'] = time_ref.isoformat()
+                # with open(f'/svea_ws/src/ltms/data/{req.name}.json', 'w') as f:
+                #     json.dump(meta, f)
 
     def resolve_dangers(self, time_ref):
         dangers = []
