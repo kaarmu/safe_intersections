@@ -83,17 +83,23 @@ if sys.version_info.minor >= 10:
         # now = datetime.now()
         now = datetime(1, 1, 1)
 
-        v1 = bob.reserve(now + timedelta(seconds=0.0), 'entry_e', 'exit_n', max_window=max_window)
-        assert v1['success'], v1['reason']
+        v1, v2, v3 = bob.reserve_many(dict(time_ref=now + timedelta(seconds=0.0),
+                                           entry_loc='entry_e', exit_loc='exit_n', 
+                                           max_window=max_window,
+                                           debug=True),
+                                      dict(time_ref=now + timedelta(seconds=1.5), 
+                                           entry_loc='entry_n', exit_loc='exit_w', 
+                                           max_window=max_window,
+                                           debug=True),
+                                      dict(time_ref=now + timedelta(seconds=0.0), 
+                                           entry_loc='entry_n', exit_loc='exit_e', 
+                                           max_window=max_window,
+                                           debug=True))
 
-        v2 = bob.reserve(now + timedelta(seconds=1.6), 'entry_e', 'exit_n', max_window=max_window, debug=True)
-        assert v2['success'], v2['reason']
-
-        v3 = bob.reserve(now + timedelta(seconds=3.2), 'entry_e', 'exit_n', max_window=max_window, debug=True)
-        assert v3['success'], v3['reason']
-
-        diff = (v3['time_ref'] - v1['time_ref']).total_seconds()
-        n = int(np.ceil(diff / 0.2))
+        
+        first = min(v1['time_ref'], v2['time_ref'], v3['time_ref'])
+        last = max(v1['time_ref'], v2['time_ref'], v3['time_ref'])
+        n = int(np.ceil((last-first).total_seconds() / 0.2))
         timeline = new_timeline(0.2*n + 5)
         v1_part = v1['analysis']['pass4']
         v2_part = v2['analysis']['pass4']
@@ -103,13 +109,15 @@ if sys.version_info.minor >= 10:
         v2_full = np.ones(timeline.shape + v2_part.shape[1:])
         v3_full = np.ones(timeline.shape + v3_part.shape[1:])
 
-        v1_full[0:0+26] = v1_part
+        diff = (v1['time_ref'] - first).total_seconds()
+        n = int(np.ceil(diff / 0.2))
+        v1_full[n:n+26] = v1_part
         
-        diff = (v2['time_ref'] - v1['time_ref']).total_seconds()
+        diff = (v2['time_ref'] - first).total_seconds()
         n = int(np.ceil(diff / 0.2))
         v2_full[n:n+26] = v2_part
         
-        diff = (v3['time_ref'] - v1['time_ref']).total_seconds()
+        diff = (v3['time_ref'] - first).total_seconds()
         n = int(np.ceil(diff / 0.2))
         v3_full[n:n+26] = v3_part
 

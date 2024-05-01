@@ -190,3 +190,11 @@ class Bob:
         for rid, reservation in list(self._reservations.items()):
             if reservation['time_ref'] + timedelta(seconds=self.o.time_horizon) < time_ref:
                 self._reservations.pop(rid, None)
+
+    def reserve_many(self, *reqs):
+        out = []
+        for kwargs in reqs:
+            r = self.reserve(**kwargs)
+            assert r['success'], r['reason']
+            out.append(r)
+        return out
