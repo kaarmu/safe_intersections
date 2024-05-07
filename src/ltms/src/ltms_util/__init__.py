@@ -88,11 +88,11 @@ if sys.version_info.minor >= 10:
                                            max_window=max_window,
                                            debug=True),
                                       dict(time_ref=now + timedelta(seconds=1.5), 
-                                           entry_loc='entry_n', exit_loc='exit_w', 
+                                           entry_loc='entry_e', exit_loc='exit_n', 
                                            max_window=max_window,
                                            debug=True),
-                                      dict(time_ref=now + timedelta(seconds=0.0), 
-                                           entry_loc='entry_n', exit_loc='exit_e', 
+                                      dict(time_ref=now + timedelta(seconds=3.0), 
+                                           entry_loc='entry_e', exit_loc='exit_n', 
                                            max_window=max_window,
                                            debug=True))
 
@@ -173,12 +173,12 @@ if sys.version_info.minor >= 10:
         fig.tight_layout()
         fig.savefig('plot-xt.png')
 
-        # x=-0.75, y=-0.25, h=0, v=?
-        ix = val2ind(-0.5, 0)
-        iy = val2ind(-0.25, 1)
-        ih = val2ind(0, 2)
-        # [13, ix, iy, ih, :]
-        vf = v2_full[14]
+        # # x=-0.75, y=-0.25, h=0, v=?
+        # ix = val2ind(-0.5, 0)
+        # iy = val2ind(-0.25, 1)
+        # ih = val2ind(0, 2)
+        # # [13, ix, iy, ih, :]
+        #vf = v2_full[14]
         dt = 0.2
         shape = 31, 31, 25, 7
         x, y, h, v = np.meshgrid(*[np.linspace(RC['min_bounds'][i], RC['max_bounds'][i], shape[i])
@@ -195,14 +195,48 @@ if sys.version_info.minor >= 10:
             [0],
             [1],
         ])
-        # idx = np.where(vf <= 0)
-        idx = (ix, iy, ih, slice(0, 7))
-        dvdx = np.array(np.gradient(vf))[(...,) + idx]
 
-        a = vf[idx] + dt*np.sum(dvdx * f[(...,) + idx], axis=0)
-        b = (g.T @ dvdx)
-        u = np.linspace(-0.4, 0.4, 25).reshape(len(b), -1)
-        lrcs = a.reshape(-1, 1) + b.T @ u
+        # # idx = np.where(vf <= 0)
+        # idx = (ix, iy, ih, slice(0, 7))
+        # dvdx = np.array(np.gradient(vf))[(...,) + idx]
+
+        # a = vf[idx] + dt*np.sum(dvdx * f[(...,) + idx], axis=0)
+        # b = (g.T @ dvdx)
+        # u = np.linspace(-0.4, 0.4, 25).reshape(len(b), -1)
+        # lrcs = a.reshape(-1, 1) + b.T @ u
+
+        for vf_full in (v1_full, v2_full, v3_full):
+
+            times = [] 
+            arr = np.random.rand(100, 4)
+            arr[:, 0] *= len(timeline) - 1
+            arr[:, 1:3] *= 31 - 1
+            arr[:, 3] *= 25 - 1
+            arr = np.round(arr).astype(int)
+
+            for it, ix, iy, ih in arr:
+                start = time()
+                # # x=-0.75, y=-0.25, h=0, v=?
+                # ix = val2ind(-0.5, 0)
+                # iy = val2ind(-0.25, 1)
+                # ih = val2ind(0, 2)
+                # [13, ix, iy, ih, :]
+                # vf = v2_full[14]
+
+                vf = vf_full[it]
+                # idx = np.where(vf <= 0)
+                idx = (ix, iy, ih, slice(0, 7))
+                dvdx = np.array(np.gradient(vf))[(...,) + idx]
+
+                a = vf[idx] + dt*np.sum(dvdx * f[(...,) + idx], axis=0)
+                b = (g.T @ dvdx)
+                u = np.linspace(-0.4, 0.4, 25).reshape(len(b), -1)
+                lrcs = a.reshape(-1, 1) + b.T @ u
+                stop = time()
+
+                times.append(stop-start)
+            print(sum(times)/len(times))
+
 
         fig, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
         ax.set_xlabel(r'Velocity [$m/s$]')

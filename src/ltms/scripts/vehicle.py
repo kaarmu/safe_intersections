@@ -215,7 +215,7 @@ class Vehicle:
 
         ## Create service proxies
 
-        self.req_corridor = rospy.ServiceProxy('/ltms/request_corridor', ReserveCorridor)
+        # self.req_corridor = rospy.ServiceProxy('/ltms/request_corridor', ReserveCorridor)
 
         ## Create publishers
 
@@ -235,6 +235,14 @@ class Vehicle:
 
         start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
 
+        clovers = np.load(Path(__file__) / '../data/clovers-v1.npz', allow_pickle=True)
+
+        self.append_path(clovers['exit_w'])
+        self.append_path(clovers['exit_s'])
+        self.append_path(clovers['exit_e'])
+        self.append_path(clovers['exit_n'])
+
+        self.INIT_ENTRY = ''
         if self.INIT_ENTRY:
 
             # path to entry
