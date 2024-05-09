@@ -9,6 +9,9 @@
     <!-- Main argument -->
     <arg name="is_sim"                  default="false"/>
     <arg name="is_indoors"              default="true" />
+    <arg name="map_lat"                 default="0.0" />
+    <arg name="map_lon"                 default="0.0" />
+    <arg name="map_yaw"                 default="0.0" />
     <arg name="initial_pose_x"          default="0.0" />
     <arg name="initial_pose_y"          default="0.0" />
     <arg name="initial_pose_a"          default="0.0" />
@@ -50,8 +53,7 @@
         </node>
     </group>
 
-    <!-- Start map server -->
-    <node if="$(eval map != '')" pkg="map_server" type="map_server" name="map_server" output="screen" args="$(arg map_file)"/>
+    <node if="$(eval map_file != '')" pkg="map_server" type="map_server" name="map_server" output="screen" args="$(arg map_file)"/>
 
     <!-- start all sensors if this is not a simulation -->
     <group unless="$(arg is_sim)">
@@ -85,6 +87,9 @@
             <include file="$(find svea_sensors)/launch/sensors_launch/navsat.launch">
                 <arg name="delay"           value="$(arg delay)"/>
                 <arg name="yaw_offset"      value="$(arg initial_pose_a)"/>
+                <arg name="map_lat"         value="$(arg map_lat)"/>
+                <arg name="map_lon"         value="$(arg map_lon)"/>
+                <arg name="map_yaw"         value="$(arg map_yaw)"/>
             </include>
         </group>
 

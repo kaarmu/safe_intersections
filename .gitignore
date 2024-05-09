@@ -14,3 +14,5 @@ src/.vscode/
 
 venv/
 site/
+
+*.html
