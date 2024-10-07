@@ -109,12 +109,54 @@ class Solver:
         for key, val in dynamics.items():
             bs += pack('sxf', key.encode(), val)
         self.code_dynamics = bytes([sum(bs) % 256]).hex()
+    
+    def nearest_index(self, x):
+        x = np.array(x)
+        # assert (x >= min_bounds).all() and (x <= max_bounds).all(), f'Point {x} is out of bounds'
+        ix = np.array(self.grid.nearest_index(x), int)
+        ix = np.where(ix >= self.grid.shape, np.array(self.grid.shape)-1, ix)
+        return tuple(ix)
+    
+    def spatial_deriv(self, vf, ix):
+        spatial_deriv = []
+
+        for axis in range(len(ix)):
+            
+            ix_nxt = list(ix)
+            ix_nxt[axis] += 1
+            ix_nxt = tuple(ix_nxt)
+
+            ix_prv = list(ix)
+            ix_prv[axis] -= 1
+            ix_prv = tuple(ix_prv)
+
+            sign = np.sign(vf[ix])
+
+            if ix[axis] == 0:
+                leftv = (vf[ix_nxt[:axis] + (-1,) + ix_nxt[axis+1:]] if self.grid._is_periodic_dim[axis] else 
+                        vf[ix] + sign*np.abs(vf[ix_nxt] - vf[ix]))
+                rightv = vf[ix_nxt]
+            elif ix[axis] == self.grid.shape[axis] - 1:
+                leftv = vf[ix_prv]
+                rightv = (vf[ix_prv[:axis] + (0,) + ix_prv[axis+1:]] if self.grid._is_periodic_dim[axis] else 
+                        vf[ix] + sign*np.abs(vf[ix] - vf[ix_prv]))
+            else:
+                leftv = vf[ix_prv]
+                rightv = vf[ix_nxt]
+
+            left_dx = (vf[ix] - leftv) / self.grid.spacings[axis]
+            right_dx = (rightv - vf[ix]) / self.grid.spacings[axis]
+            spatial_deriv.append((left_dx + right_dx) / 2)
+
+        return np.array(spatial_deriv)
+
 
     def brs(self, times, target, constraints=None, *, mode='reach', interactive=True):
         jnp = hj.solver.jnp
         times = -jnp.asarray(times)
         target = jnp.asarray(target)
-        constraints = jnp.asarray(constraints)
+        if constraints is not None:
+            constraints = jnp.asarray(constraints)
         if not  shp.is_invariant(self.grid, times, target):
             target = jnp.flip(target, axis=0)
         if not shp.is_invariant(self.grid, times, constraints):
@@ -144,6 +186,30 @@ class Solver:
                           constraints,
                           progress_bar=interactive)
         return np.asarray(values)
+    
+    def lrcs(self, vf, x, i):
+        f = self.reach_dynamics.open_loop_dynamics(x, 0)
+        g = self.reach_dynamics.control_jacobian(x, 0)
+
+        ix = self.nearest_index(x)
+        dvdx = self.spatial_deriv(vf[i], ix)
+
+        a = np.array(vf[(i+1, *ix)] + self.time_step*(dvdx.T @ f))
+        b = np.array(self.time_step*(dvdx.T @ g))
+
+        control_space = np.array([
+            self.reach_dynamics.control_space.lo,
+            self.reach_dynamics.control_space.hi,
+        ]).T
+        control_vecs = [np.linspace(*lohi) for lohi in control_space]
+        control_grid = np.meshgrid(*control_vecs)
+
+        # This is the important part.
+        # Essentially we want: a + b \cdot u <= 0
+        # Here, `mask` masks the set over the control space spanned by `control_vecs`
+        terms = [us*b_ for us, b_ in zip(control_grid, b)]
+        mask = sum(terms, a) <= 0
+        return mask, control_vecs
 
     def run_analysis(self, *passes, **kwargs):
         """

@@ -7,7 +7,6 @@ float32 latest_entry
 ---
 bool success
 string reason
-string id
 string time_ref
 float32 earliest_entry
 float32 latest_entry

@@ -1,0 +1,23 @@
+Vehicle at Init
+	- Create route
+	- Decide time to leave t0
+	- Calc when approx it reaches route regions/checkpoints
+	- Notify regions when it will approx be there
+
+Vehicle at region Ra
+	- 
+
+Server
+	- Assume all vehicles notify their intent to enter at least T before entering.
+	- Plan vehicle 
+
+
+
+
+----------------------------------------- timeline
+           [     ]		vehicle A <|
+             [     ]		vehicle B <|
+               [     ]		vehicle C <| 
+                [     ] 	vehicle D  |<- Depends on A, B and C. Needs to be computed "at least T" before t0
+
+

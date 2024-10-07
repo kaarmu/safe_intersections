@@ -252,3 +252,135 @@ if sys.version_info.minor >= 10:
                               -0.4, +0.4])
         fig.tight_layout()
         fig.savefig('plot-lrcs.png')
+
+    def chaos():
+
+        def around(l, e, n):
+            if e not in l: return []
+            i = l.index(e)
+            N = len(l)
+            return [l[(i+j) % N] for j in range(-n, n+1)]
+
+        RC['model'] = 'Bicycle5D'
+        RC['min_bounds'] = [-1.5, -1.5, -np.pi, -np.pi/5, +0.0]
+        RC['max_bounds'] = [+1.5, +1.5, +np.pi, +np.pi/5, +0.6]
+        RC['grid_shape'] = (31, 31, 25, 5, 7)
+
+        RC['extent'] = [RC['min_bounds'][0], RC['max_bounds'][0], 
+                        RC['min_bounds'][1], RC['max_bounds'][1]]
+
+        RC['locations'] = [
+            'center_e', 'center_ene', 'center_ne', 'center_nne',
+            'center_n', 'center_nnw', 'center_nw', 'center_wnw',
+            'center_w', 'center_wsw', 'center_sw', 'center_ssw',
+            'center_s', 'center_ese', 'center_se', 'center_sse',
+        ]
+        RC['permitted_routes'] = {
+            (_entry, _exit): ('outside',)
+            for _entry in RC['locations']
+            for _exit in set(RC['locations']) - set(around(RC['locations'], _entry, 4)) # flip
+        }
+
+        RC['entry_locations']   = RC['locations'] + ['init']
+        RC['exit_locations']    = RC['locations']
+        RC['locations'] += ['outside']
+        RC['permitted_routes'].update({
+            ('init', _exit): ('outside',)
+            for _exit in 'center_ne center_ene center_e'.split()
+        })
+
+        RC['bob']['model']              = RC['model']
+        RC['bob']['grid_shape']         = RC['grid_shape']
+        RC['bob']['min_bounds']         = RC['min_bounds']
+        RC['bob']['max_bounds']         = RC['max_bounds']
+
+        from datetime import datetime, timedelta
+        import matplotlib as mpl
+
+        mpl.rcParams.update(**{'font.size': 22})
+
+        bob = Bob(interactive=True)
+
+        max_window = 1.5
+
+        # now = datetime.now()
+        now = datetime(1, 1, 1)
+
+        v1, v2 = bob.reserve_many(dict(time_ref=now + timedelta(seconds=0.0),
+                                       entry_loc='init', exit_loc='center_e', 
+                                       max_window=max_window,
+                                       debug=True),
+                                  dict(time_ref=now + timedelta(seconds=1.5), 
+                                       entry_loc='init', exit_loc='center_e', 
+                                       max_window=max_window,
+                                       debug=True))
+
+        
+        first = min(v1['time_ref'], v2['time_ref'])
+        last = max(v1['time_ref'], v2['time_ref'])
+        n = int(np.ceil((last-first).total_seconds() / 0.2))
+        timeline = new_timeline(0.2*n + 5)
+        v1_part = v1['analysis']['pass4']
+        v2_part = v2['analysis']['pass4']
+
+        v1_full = np.ones(timeline.shape + v1_part.shape[1:])
+        v2_full = np.ones(timeline.shape + v2_part.shape[1:])
+
+        diff = (v1['time_ref'] - first).total_seconds()
+        n = int(np.ceil(diff / 0.2))
+        v1_full[n:n+26] = v1_part
+        
+        diff = (v2['time_ref'] - first).total_seconds()
+        n = int(np.ceil(diff / 0.2))
+        v2_full[n:n+26] = v2_part
+        
+        v2_depart   = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_arrival  = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_depart[n:n+26] = v2['analysis']['entry_target']
+        v2_arrival[n:n+26] = v2['analysis']['exit_target']
+
+        v2_pass2 = np.ones(timeline.shape + v2_part.shape[1:])
+        v2_pass2[n:n+26] = v2['analysis']['pass2']
+
+        def keep(vf, ax, lo, hi):
+            out = np.ones_like(vf)
+            idx = tuple(slice(lo, hi) if i == ax else slice(0, n)
+                        for i, n in enumerate(vf.shape))
+            out[idx] = vf[idx]
+            return out
+
+        interact_tubes(timeline, 
+                       ('reds', v1_full), 
+                       ('blues', v2_full), 
+                       bgpath='../data/4way.png')().write_html('plot.html')
+
+        interact_tubes(timeline, 
+                       ('reds', keep(v1_full, 2, 9, 12)), 
+                       ('greys', v2_pass2, dict(opacity=0.4)),
+                       ('blues', v2_full), 
+                       ('greens', v2_depart),
+                       ('greens', v2_arrival),
+                       bgpath='../data/4way.png')().write_html('plot-slice.html')
+        
+        new_map(
+            (shp.project_onto(v1_full, 0, 1, 2)[14], dict(cmap='Reds')), 
+            (shp.project_onto(v2_full, 0,1,2)[14], dict(cmap='Blues')),
+            bgpath='../data/4way.png'
+        ).savefig('plot-xy.png')
+
+        fig, ax = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(9*4/3, 9))
+        ax.set_xlabel('x [m]')
+        ax.set_ylabel('t [s]')
+        plot_levelset_many(
+            (shp.project_onto(v1_full[:,:,9:12], 0, 1), dict(cmap='Reds')),
+            (shp.project_onto(v2_pass2[:,:,9:12], 0, 1), dict(cmap='Greys', alpha=0.3)),
+            (shp.project_onto(v2_full[:,:,9:12], 0, 1), dict(cmap='Blues')),
+            (shp.project_onto(v2_depart[:,:,9:12], 0, 1), dict(cmap='Greens')),
+            (shp.project_onto(v2_arrival[:,:,9:12], 0, 1), dict(cmap='Greens')),
+            ax=ax, 
+            alpha=0.9, 
+            aspect=2.5/timeline.max(), 
+            extent=[-1.25, +1.25, 0, timeline.max()],
+        )
+        fig.tight_layout()
+        fig.savefig('plot-xt.png')

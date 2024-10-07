@@ -10,7 +10,7 @@ import hj_reachability.shapes as shp
 
 from .rc import RC
 from .util import setdefaults
-from .env import create_4way
+from .env import create_chaos
 from .solver import Solver
 
 class Bob:
@@ -64,7 +64,7 @@ class Bob:
                 self.env[loc] = np.load(filename, allow_pickle=True)
                 if self.o.interactive: print(f'Loading {filename}')
             else:
-                self.env.update(create_4way(self.solver.grid, loc))
+                self.env.update(create_chaos(self.solver.grid, loc))
                 if self.o.interactive: print(f'Saving {filename}')
                 np.save(filename, self.env[loc], allow_pickle=True)
         if self.o.interactive: print('Environment done.', end='\n\n')
