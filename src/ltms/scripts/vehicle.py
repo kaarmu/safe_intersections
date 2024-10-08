@@ -22,7 +22,7 @@ from svea_planners.astar import AStarPlanner, AStarWorld
 
 # ROS imports
 import rospy
-from ltms.srv import ReserveCorridor
+from ltms.srv import Connect, Notify, Reserve
 import message_filters as mf
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Path
@@ -70,85 +70,37 @@ def load_param(name, value=None):
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, value)
 
-def publish_initialpose(state, n=10):
-    p = PoseWithCovarianceStamped()
-    p.header.frame_id = "map"
-    p.pose.pose.position.x = state.x
-    p.pose.pose.position.y = state.y
-
-    q = quaternion_from_euler(0, 0, state.yaw)
-    p.pose.pose.orientation.z = q[2]
-    p.pose.pose.orientation.w = q[3]
-
-    pub = rospy.Publisher("/initialpose", PoseWithCovarianceStamped, queue_size=10)
-    rate = rospy.Rate(10)
-
-    for _ in range(n):
-        pub.publish(p)
-        rate.sleep()
-
-def pathlen(path):
-    dist = 0
-    for i, nxt in enumerate(path[1:]):
-        pnt = path[i]
-        dist += np.hypot(nxt[0] - pnt[0], nxt[1] - pnt[1])
-    return dist
-
-def service_like(f):
-    q = SimpleQueue()
-    def worker():
-        while not rospy.is_shutdown():
-            try:
-                item = q.get(timeout=1)
-            except Exception: pass
-            else:
-                args, kwds = item
-                f(*args, **kwds)
-    t = Thread(target=worker)
-    def wrapper(*args, **kwds):
-        q.put((args, kwds))
-        if not t.is_alive():
-            t.start()
-    return wrapper
-
 class Vehicle:
+    
+    NUM_SESSIONS = 5
 
     DELTA_TIME = 0.1
-
-    OUTSIDE_ROUTES = {
-        'exit_s': 'entry_w',
-        'exit_w': 'entry_n',
-        'exit_n': 'entry_e',
-        'exit_e': 'entry_s',
-    }
-
-    INSIDE_ROUTES = {
-        'entry_s': ['exit_w', 'exit_n', 'exit_e'],
-        'entry_w': ['exit_n', 'exit_e', 'exit_s'],
-        'entry_n': ['exit_e', 'exit_s', 'exit_w'],
-        'entry_e': ['exit_s', 'exit_w', 'exit_n'],
-    }
-
-    # Enable U-turns
-    INSIDE_ROUTES['entry_s'].append('exit_s')
-    INSIDE_ROUTES['entry_w'].append('exit_w')
-    INSIDE_ROUTES['entry_n'].append('exit_n')
-    INSIDE_ROUTES['entry_e'].append('exit_e')
-
-    LOCATION_COORDINATES = {
-        'entry_s': (+0.25, -1.00),
-        'entry_w': (-1.00, -0.25),
-        'entry_n': (-0.25, +1.00),
-        'entry_e': (+1.00, +0.25),
-        'exit_s':  (-0.25, -1.00), 
-        'exit_w':  (-1.00, +0.25), 
-        'exit_n':  (+0.25, +1.00), 
-        'exit_e':  (+1.00, -0.25), 
-    }
-
-    MAX_VEL = 0.8
+    LOOP_TIME = 3.0
+    
     MIN_VEL = 0.4
-    MED_VEL = (MAX_VEL + MIN_VEL)/2
+    MAX_VEL = 0.8
+    MIN_ACC = -0.2
+    MAX_ACC = 0.2
+    MIN_STEER = -np.pi/4
+    MAX_STEER = np.pi/4
+    MIN_STEER_RATE = -np.pi/4
+    MAX_STEER_RATE = np.pi/4
+    
+    STATE_DIMS = 4 # or 5 if including steering rate
+    if STATE_DIMS == 4:
+        ACC_GRID, STEER_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER, MAX_STEER))
+    elif STATE_DIMS == 5:
+        ACC_GRID, STEER_RATE_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER_RATE, MAX_STEER_RATE))
+    
+    NUM_ENTRIES = 8
+    NUM_EXITS = 4
+    ENTRY_HEADINGS = np.linspace(0, 2*np.pi, NUM_ENTRIES, endpoint=False)
+    EXIT_HEADINGS = np.linspace(0, 2*np.pi, NUM_EXITS, endpoint=False)
+    MAX_ENTRY_DELTA = np.pi/4
+    ENTRY_TIMES = np.arange(0, NUM_SESSIONS*LOOP_TIME, LOOP_TIME)
+    EXIT_TIMES = np.arange(LOOP_TIME, NUM_SESSIONS*LOOP_TIME+LOOP_TIME, LOOP_TIME)
+    
+    LIMITS_SHAPE = (50, 50)
 
     DEBUG = True
 
@@ -163,333 +115,137 @@ class Vehicle:
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
         self.INIT_STATE = load_param("~init_state", [4, 4, np.pi*3/4, 0])
-        self.INIT_ENTRY = load_param('~init_entry', 'entry_e')
         self.INIT_WAIT = load_param('~init_wait', 5)
-        self.IS_SIM = load_param('~is_sim', True)
-        self.USE_MOCAP = load_param('~use_mocap', False)
-
-        ## Set initial values
 
         # initial state
-        state = VehicleState(*self.INIT_STATE)
-        publish_initialpose(state)
+        self.steer = 0.0
+        self.state = VehicleState(*self.INIT_STATE)
 
-        self.goto_waypoints = deque(maxlen=5)
-        self.paths = deque()
-
-        ## Create simulators, models, managers, etc.
-
+        # rate
         self.rate = rospy.Rate(10)
 
-        if self.IS_SIM:
-            # simulator need a model to simulate
-            self.sim_model = SimpleBicycleModel(state)
-
-            # start the simulator immediately, but paused
-            self.simulator = SimSVEA(
-                self.sim_model, dt=self.DELTA_TIME, run_lidar=True, start_paused=True
-            ).start()
-
-        ## Start lli interfaces
-
-        if self.USE_MOCAP:
-            self.init_mocap()
-
-        self.localization = LocalizationInterface().start()
-        self.actuation = ActuationInterface().start(wait=True)
-        self.planning = PlannerInterface()
-
-        self.state = self.localization.state
-
-        ## Create controller and planner
-
-        self.planner = AStarPlanner(0.1, limit=[[-5, 5], [-5, 5]], obstacles=create_4way_obs())
-        self.controller = PurePursuitController()
-        self.controller.set_path([[0, 0]])
-
-        ## Create transformer
-
-        self.buffer = tf2_ros.Buffer(rospy.Duration(10))
-        self.listener = tf2_ros.TransformListener(self.buffer)
-        self.br = tf2_ros.TransformBroadcaster()
+        # initialize motion capture
+        self.init_mocap()
 
         ## Create service proxies
-
-        # self.req_corridor = rospy.ServiceProxy('/ltms/request_corridor', ReserveCorridor)
-
-        ## Create publishers
-
-        ## Create subscribers
-
-        rospy.Subscriber('/clicked_point', PointStamped, self.clicked_point_cb)
+        self.connect_srv = rospy.ServiceProxy('connect', Connect)
 
         ## Node initialized
 
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
-
-        # everything ready to go -> unpause simulator
-        if self.IS_SIM:
-            self.simulator.toggle_pause_simulation()
-
-        self.localization.block_until_state()
-
-        start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
-
-        clovers = np.load(Path(__file__) / '../data/clovers-v1.npz', allow_pickle=True)
-
-        self.append_path(clovers['exit_w'])
-        self.append_path(clovers['exit_s'])
-        self.append_path(clovers['exit_e'])
-        self.append_path(clovers['exit_n'])
-
-        self.INIT_ENTRY = ''
-        if self.INIT_ENTRY:
-
-            # path to entry
-            time_ref = start_time
-            entry_loc = self.INIT_ENTRY
-            init_path = self.plan_to_location(entry_loc)
-            init_path_dist = pathlen(init_path)
-            earliest_entry = init_path_dist / self.MAX_VEL
-            latest_entry = init_path_dist / self.MIN_VEL
-            entry_loc = random.choice(list(self.INSIDE_ROUTES)) 
-            resp, exit_loc, outside_path, reentry_loc = self.plan_inside_outside(time_ref, entry_loc, earliest_entry, latest_entry)
-            
-            assert resp.success, 'Not successful planning'
-            entry_time = datetime.fromisoformat(resp.time_ref) 
-            entry_time += timedelta(seconds=resp.earliest_entry+resp.latest_entry) / 2
-
-            init_vel = init_path_dist / (entry_time - start_time).total_seconds()
-            print('init_vel:', init_vel)
-            self.append_path(init_path, init_vel)
-
-            # entry to reentry
-            inside_init = self.LOCATION_COORDINATES[entry_loc]
-            inside_goal = self.LOCATION_COORDINATES[exit_loc]
-            inside_corridor = np.frombuffer(bytes(resp.corridor), bool).reshape(resp.shape)
-            inside_path = self.one_shot_plan(inside_init, inside_goal, ~inside_corridor)
-            self.append_path(inside_path)
-
-            self.append_path(outside_path)
-            
-        if False:
-            xy = (self.state.x, self.state.y)
-            path = self.plan_to_location(xy, self.INIT_ENTRY)
-            dist = pathlen(path)
-            
-            while not rospy.is_shutdown():
-                _ = self.sched_route(time_ref=start_time,
-                                     entry_loc=self.INIT_ENTRY,
-                                     earliest_entry=round(dist/self.MAX_VEL, 1),
-                                     latest_entry=round(dist/self.MIN_VEL, 1),
-                                     exit_loc=random.choice(self.INSIDE_ROUTES[self.INIT_ENTRY]))
-                if ...:
-                    break
-                else:
-                    start_time += timedelta(seconds=2)
         
-        now = datetime.now()
-        while not rospy.is_shutdown() and now < start_time:
-            rospy.sleep(0.02)
-            now = datetime.now()
-            print(f'{(start_time - now).total_seconds():0.02f} s left until start.', end='\r', flush=True)
-        
-        def switching_worker():
-            rate = rospy.Rate(10)
-            switch = True
-            while not rospy.is_shutdown():
-                f = self.outside_spin if switch else self.inside_spin
-                switch ^= f()
-                rate.sleep()
-                
-        # Thread(target=switching_worker).start()
-
-        print(f'Starting!'.ljust(25))
+    def init_session(self, id):
+        def limits_cb(msg):
+            limits = np.frombuffer(msg.data, dtype=np.float32)
+            self.sessions[id]['limits'] = limits.reshape(self.LIMITS_SHAPE)
+            
+        name = f'{self.NAME}_{id}'
+        entry_time = self.init_time + rospy.Duration(self.ENTRY_TIMES[id])
+        exit_time = self.init_time + rospy.Duration(self.EXIT_TIMES[id])
+        ## Connect to LTMS
+        resp = self.connect_srv(name, entry_time)
+        if not resp.success:
+            rospy.logerr(f'Failed to connect to LTMS: {resp.message}')
+            return
+        ## Set up session
+        self.sessions[id]['name'] = name
+        self.sessions[id]['entry_time'] = entry_time
+        self.sessions[id]['exit_time'] = exit_time
+        self.sessions[id]['its_id'] = resp.its_id
+        self.sessions[id]['states_pub'] = rospy.Publisher(f'{name}/states', VehicleStateMsg, queue_size=1)
+        self.sessions[id]['notify_srv'] = rospy.ServiceProxy(f'{resp.its_id}/notify', Notify)
+        self.sessions[id]['reserve_srv'] = rospy.ServiceProxy(f'{resp.its_id}/reserve', Reserve)
+        self.sessions[id]['limits_sub'] = rospy.Subscriber(f'{resp.its_id}/limits', bytes, limits_cb)
+        self.sessions[id]['valid'] = True
+    
+    def control_update(self, limits_mask, steer_rate=False):
+        if not steer_rate:
+            steer_range = (self.steer + self.MIN_STEER_RATE*self.DELTA_TIME, self.steer + self.MAX_STEER_RATE*self.DELTA_TIME)
+            valid_limits = limits_mask & (self.ACC_GRID >= self.MIN_ACC) & (self.ACC_GRID <= self.MAX_ACC) & (self.STEER_GRID >= steer_range[0]) & (self.STEER_GRID <= steer_range[1])
+        else:
+            valid_limits = limits_mask & (self.ACC_GRID >= self.MIN_ACC) & (self.ACC_GRID <= self.MAX_ACC) & (self.STEER_RATE_GRID >= self.MIN_STEER_RATE) & (self.STEER_RATE_GRID <= self.MAX_STEER_RATE)
+        # select a random control from the valid limits
+        i, j = np.random.choice(np.argwhere(valid_limits))
+        vel = self.state.v + self.ACC_GRID[i, j]*self.DELTA_TIME
+        steer = self.steer + self.STEER_RATE_GRID[i, j]*self.DELTA_TIME if steer_rate else self.STEER_GRID[i, j]
+        return vel, steer
+    
+    def choose_exit(self, entry):
+        exit_headings = np.array([h for h in self.EXIT_HEADINGS if np.abs(h - entry) < self.MAX_EXIT_DELTA])
+        return np.random.choice(exit_headings)
 
     def init_mocap(self):
-        self._state_pub = rospy.Publisher('state', VehicleStateMsg, latch=True, queue_size=1)
         def state_cb(pose, twist):
             state = VehicleStateMsg()
             state.header = pose.header
-            state.child_frame_id = 'svea2'
+            state.child_frame_id = self.NAME
             state.x = pose.pose.position.x 
             state.y = pose.pose.position.y
             roll, pitch, yaw = euler_from_quaternion([pose.pose.orientation.x,
-                                                        pose.pose.orientation.y,
-                                                        pose.pose.orientation.z,
-                                                        pose.pose.orientation.w])
+                                                      pose.pose.orientation.y,
+                                                      pose.pose.orientation.z,
+                                                      pose.pose.orientation.w])
             state.yaw = yaw
             state.v = twist.twist.linear.x
-            self._state_pub.publish(state)
+            self.state = state
+            
         mf.TimeSynchronizer([
             mf.Subscriber(f'/qualisys/{self.NAME}/pose', PoseStamped),
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
         ], 10).registerCallback(state_cb)
 
-    def plan_inside_outside(self, time_ref, entry_loc, earliest_entry, latest_entry):
-        exit_loc = random.choice(self.INSIDE_ROUTES[entry_loc])
-
-        req = ReserveCorridor._request_class(
-            name=self.NAME,
-            entry=entry_loc,
-            exit=exit_loc,
-            time_ref=time_ref.isoformat(),
-            earliest_entry=earliest_entry,
-            latest_entry=latest_entry,
-        )
-
-        t0 = time()
-        resp = self.req_corridor(req)
-        t1 = time()
-
-        outside_path, reentry_loc = self.plan_outside(exit_loc)
-        outside_dist = pathlen(outside_path)
-
-        if self.DEBUG:
-            print('[req]')
-            print(req)
-            print('[resp]')
-            print(resp)
-            print('[time]')
-            print('latency:', t1-t0)
-            print('now:', datetime.now().isoformat())
-            print('[path]')
-            print('state:', self.state.x, self.state.y)
-            print('goal:', *outside_path[-1])
-            print('steps:', len(outside_path))
-            print('dist:', outside_dist)
-            print('earliest:', outside_dist/self.MAX_VEL)
-            print('latest:', outside_dist/self.MIN_VEL)
-
-        return resp, exit_loc, outside_path, reentry_loc
-
-    def plan_outside(self, entry_loc):
-        exit_loc = self.OUTSIDE_ROUTES[entry_loc]
-        entry_xy = self.LOCATION_COORDINATES[entry_loc]
-        exit_xy = self.LOCATION_COORDINATES[exit_loc]
-        path = self.planner.plan(entry_xy, exit_xy)
-        return path, exit_loc
-    
-    def one_shot_plan(self, init, goal, occ_grid):
-        planner = AStarPlanner(2.5 / 31, limit=[[-1.25, 1.25], [-1.25, 1.25]], occ_grid=occ_grid)        
-        return planner.plan(init, goal)
-
-    def plan_to_goal(self, goal):
-        init = self.state.x, self.state.y
-        return self.planner.plan(init, goal)
-
-    def plan_to_location(self, loc):
-        xy = self.LOCATION_COORDINATES[loc]
-        return self.plan_to_goal(xy)
-
-    def goto(self, goal):
-        path = self.plan_to_goal(goal)
-        if path:
-            self.follow_path(path)
-            rospy.loginfo("Going to (%f, %f)", *goal)
-        else:
-            rospy.loginfo('Could not find a path to (%f, %f)', *goal)
-        return path
-
-    def follow_path(self, path, vel=None):
-        self.planning.set_points_path(path)
-        self.planning.publish_path()
-        self.controller.set_path(path)
-        self.controller.set_target_velocity(self.MED_VEL if vel is None else vel)
-        self.controller.is_finished = False
-    def append_path(self, *args, **kwds):
-        self.paths.append((args, kwds))
-    def next_path(self):
-        args, kwds = self.paths.popleft()
-        self.follow_path(*args, **kwds)
-
-    def goto_next_waypoint(self):
-        if self.goto_waypoints:
-            goal = self.goto_waypoints.popleft()
-            self.goto(goal)
-    
-    def clicked_point_cb(self, msg):
-        wayp = msg.point.x, msg.point.y
-        if wayp not in self.planner.world:
-            rospy.loginfo("Waypoint not in world.")
-        self.goto_waypoints.append(wayp)
-        
-    def inside_spin(self):
-        
-        # ask for lrcs
-        lrcs = ...
-        
-
-    def outside_spin(self):
-
-        
-        return False
 
     def run(self):
 
-        rate = rospy.Rate(10)
+        ## Wait for init time
+        rospy.sleep(self.INIT_WAIT)
+        self.init_time = rospy.Time.now()
 
-        t0 = time()
+        ## Initialize sessions
+        self.sessions = {}
+        for id in range(self.NUM_SESSIONS):
+            self.init_session(id)
 
-        while not rospy.is_shutdown() and not (self.controller.is_finished and not self.paths):
+        current_session_id = 0
+        
+        while not rospy.is_shutdown() and current_session_id < self.NUM_SESSIONS:
+            # Apply control
+            session = self.sessions[current_session_id]
+        
+            vel, steer = self.control_update(session['limits'], steer_rate=True if self.STATE_DIMS == 5 else False)
+            self.steer = steer
+            # Send control to vehicle
+            pass
+        
+            
+            # Status updates
+            for id in range(self.NUM_SESSIONS):
+                # Publish state
+                if id >= current_session_id:
+                    self.sessions[id]['states_pub'].publish(self.state)
+                # Update entry time
+                if id == current_session_id:
+                    pass
+                elif id == current_session_id + 1:
+                    self.sessions[id]['earliest_entry'] = self.sessions[id-1]['earliest_exit']
+                    self.sessions[id]['latest_entry'] = self.sessions[id-1]['latest_exit']
+                    self.sessions[id]['entry_time'] = (self.sessions[id]['earliest_entry']+self.sessions[id]['latest_entry'])/2
+                    notify_res = self.sessions[id]['notify_srv'](self.sessions[id]['entry_time'])
+                    if not notify_res.success:
+                        rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
+                    else:
+                        self.sessions[id]['exit_time'] = self.sessions[id]['entry_time'] + rospy.Duration(notify_res.transit_time)
+                    
+                    
+                    
+                    
+                    
+            # Check if session is over
+            pass
+            current_session_id += 1
 
-            if self.controller.is_finished:
-                t1 = time()
-                print('path completed in:', t1 - t0)
-                self.next_path()
-                t0 = t1
-
-            steering, velocity = self.controller.compute_control(self.state)
-            self.actuation.send_control(steering, velocity)
-
-            rate.sleep()
-
-        print('finished')
-        rospy.spin()
-
-
-
-### dirty tests
-
-def plot_obs(obs):
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(1, 1)
-    # bgim = plt.imread('/home/kaarmu/Projects/safe_intersection/src/ltms/data/background.png')
-    ax.imshow(bgim, extent=[-1.25, 1.25, -1.25, 1.25])
-    for x, y, r in obs:
-        patch = plt.Circle((x, y), r, fill=True, color='black')
-        ax.add_patch(patch)
-    ax.set_xlim(-5, 5)
-    ax.set_ylim(-5, 5)
-    fig.show()
-def line(p1, p2, r, d):
-    n = int(np.hypot(p2[0] - p1[0], p2[1] - p1[1]) / d)
-    out = np.zeros((n+1, 3))
-    out[:, 0] = np.linspace(p1[0], p2[0], n+1)
-    out[:, 1] = np.linspace(p1[1], p2[1], n+1)
-    out[:, 2] = r
-    return out
-def shape(ps, r, d):
-    return np.concatenate([
-        line(ps[i], ps[(i+1) % len(ps)], r, d)
-        for i in range(len(ps))
-    ])
-def translate(xy, s):
-    s = np.array(s)
-    s[:, :2] += xy
-    return s
-def rect(w, h, r, d):
-    p1 = -w/2, -h/2
-    p2 = -w/2, +h/2
-    p3 = +w/2, +h/2
-    p4 = +w/2, -h/2
-    return shape([p1, p2, p3, p4], r, d)
-def create_4way_obs():
-    corner = lambda xy: translate(xy, rect(w=0.5, h=0.5, r=0.25, d=0.25))
-    tl, tr, bl, br = map(corner, [(-1, +1), (-1, -1), (+1, -1), (+1, +1)])
-    c = rect(1, 1, r=0.1, d=0.15)
-    return np.concatenate((tl, tr, bl, br, c))
-
+            # Sleep
+            self.rate.sleep()
 
 if __name__ == '__main__':
 
