@@ -56,6 +56,12 @@ def pose_to_state(pose):
     state.yaw = yaw
     return state
 
+def around(l, e, n):
+    if e not in l: return []
+    i = l.index(e)
+    N = len(l)
+    return [l[(i+j) % N] for j in range(-n, n+1)]
+
 def load_param(name, value=None):
     """Function used to get parameters from ROS parameter server
 
@@ -75,7 +81,7 @@ class Vehicle:
     NUM_SESSIONS = 5
 
     DELTA_TIME = 0.1
-    LOOP_TIME = 3.0
+    LOOP_TIME = 5.0
     
     MIN_VEL = 0.4
     MAX_VEL = 0.8
@@ -98,7 +104,27 @@ class Vehicle:
     EXIT_HEADINGS = np.linspace(0, 2*np.pi, NUM_EXITS, endpoint=False)
     MAX_ENTRY_DELTA = np.pi/4
     ENTRY_TIMES = np.arange(0, NUM_SESSIONS*LOOP_TIME, LOOP_TIME)
-    EXIT_TIMES = np.arange(LOOP_TIME, NUM_SESSIONS*LOOP_TIME+LOOP_TIME, LOOP_TIME)
+    # EXIT_TIMES = np.arange(LOOP_TIME, NUM_SESSIONS*LOOP_TIME+LOOP_TIME, LOOP_TIME)
+    
+    LOCATIONS = [
+        'center_e', 'center_ene', 'center_ne', 'center_nne',
+        'center_n', 'center_nnw', 'center_nw', 'center_wnw',
+        'center_w', 'center_wsw', 'center_sw', 'center_ssw',
+        'center_s', 'center_ese', 'center_se', 'center_sse',
+    ]
+    PERMITTED_ROUTES = {
+        (_entry, _exit): ('outside',)
+        for _entry in LOCATIONS
+        for _exit in set(LOCATIONS) - set(around(LOCATIONS, _entry, 4)) # flip
+    }
+
+    ENTRY_LOCATIONS = LOCATIONS
+    EXIT_LOCATIONS = LOCATIONS
+    LOCATIONS += ['outside']
+    PERMITTED_ROUTES.update({
+        ('init', _exit): ('outside',)
+        for _exit in 'center_ne center_ene center_e'.split()
+    })
     
     LIMITS_SHAPE = (50, 50)
 
@@ -114,24 +140,20 @@ class Vehicle:
 
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
-        self.INIT_STATE = load_param("~init_state", [4, 4, np.pi*3/4, 0])
         self.INIT_WAIT = load_param('~init_wait', 5)
-
-        # initial state
-        self.steer = 0.0
-        self.state = VehicleState(*self.INIT_STATE)
 
         # rate
         self.rate = rospy.Rate(10)
 
-        # initialize motion capture
+        # initialize mocap and state
         self.init_mocap()
+        self.steer = 0.0
+        self.in_zone = False
 
         ## Create service proxies
         self.connect_srv = rospy.ServiceProxy('connect', Connect)
 
         ## Node initialized
-
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
         
     def init_session(self, id):
@@ -141,7 +163,6 @@ class Vehicle:
             
         name = f'{self.NAME}_{id}'
         entry_time = self.init_time + rospy.Duration(self.ENTRY_TIMES[id])
-        exit_time = self.init_time + rospy.Duration(self.EXIT_TIMES[id])
         ## Connect to LTMS
         resp = self.connect_srv(name, entry_time)
         if not resp.success:
@@ -150,13 +171,18 @@ class Vehicle:
         ## Set up session
         self.sessions[id]['name'] = name
         self.sessions[id]['entry_time'] = entry_time
-        self.sessions[id]['exit_time'] = exit_time
         self.sessions[id]['its_id'] = resp.its_id
         self.sessions[id]['states_pub'] = rospy.Publisher(f'{name}/states', VehicleStateMsg, queue_size=1)
         self.sessions[id]['notify_srv'] = rospy.ServiceProxy(f'{resp.its_id}/notify', Notify)
         self.sessions[id]['reserve_srv'] = rospy.ServiceProxy(f'{resp.its_id}/reserve', Reserve)
         self.sessions[id]['limits_sub'] = rospy.Subscriber(f'{resp.its_id}/limits', bytes, limits_cb)
         self.sessions[id]['valid'] = True
+        ## Notify ITS
+        notify_res = self.sessions[id]['notify_srv'](entry_time)
+        if not notify_res.success:
+            rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
+            return
+        self.sessions[id]['exit_time'] = entry_time + rospy.Duration(notify_res.transit_time)
     
     def control_update(self, limits_mask, steer_rate=False):
         if not steer_rate:
@@ -171,8 +197,8 @@ class Vehicle:
         return vel, steer
     
     def choose_exit(self, entry):
-        exit_headings = np.array([h for h in self.EXIT_HEADINGS if np.abs(h - entry) < self.MAX_EXIT_DELTA])
-        return np.random.choice(exit_headings)
+        permitted_exits = [exit for exit in self.EXIT_LOCATIONS if self.PERMITTED_ROUTES.get((entry, exit))]
+        return np.random.choice(permitted_exits)
 
     def init_mocap(self):
         def state_cb(pose, twist):
@@ -193,10 +219,43 @@ class Vehicle:
             mf.Subscriber(f'/qualisys/{self.NAME}/pose', PoseStamped),
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
         ], 10).registerCallback(state_cb)
-
-
+        
+    def is_at_exit(self, zone=(0, 0), radius=0.25):
+        if np.linalg.norm([self.state.x - zone[0], self.state.y - zone[1]]) < radius and not self.in_zone:
+            self.in_zone = True
+            return True
+        else:
+            return False
+    
+    def update_zone_flag(self, zone=(0, 0), radius=0.5):
+        if np.linalg.norm([self.state.x - zone[0], self.state.y - zone[1]]) > radius and self.in_zone:
+            self.in_zone = False
+        
+    def reserve_entry_exit(self, id):
+        # Fix timing issues: Store all times in absolute time, and convert to relative time when reserving
+        name = self.sessions[id]['name']
+        time_ref = rospy.Time.now()
+        earliest_entry = 0.0 if id == 0 else self.sessions[id-1]['earliest_exit']
+        latest_entry = self.LOOP_TIME if id == 0 else self.sessions[id-1]['latest_exit']
+        entry = 'init' if id == 0 else self.sessions[id-1]['exit_location']
+        exit = self.choose_exit(entry)
+        # Fill session
+        self.sessions[id]['entry'] = entry
+        self.sessions[id]['exit'] = exit
+        self.sessions[id]['earliest_entry'] = res.earliest_entry
+        self.sessions[id]['latest_entry'] = res.latest_entry
+        # Reserve request
+        req = Reserve.Request(name, entry, exit, time_ref, earliest_entry, latest_entry)
+        res = self.sessions[id]['reserve_srv'](req)
+        if res.success:
+            self.sessions[id]['earliest_exit'] = res.earliest_exit
+            self.sessions[id]['latest_exit'] = res.latest_exit
+            return True
+        else:
+            rospy.logerr(f'Failed to reserve entry/exit: {res.message}')           
+            return False
+    
     def run(self):
-
         ## Wait for init time
         rospy.sleep(self.INIT_WAIT)
         self.init_time = rospy.Time.now()
@@ -209,13 +268,21 @@ class Vehicle:
         current_session_id = 0
         
         while not rospy.is_shutdown() and current_session_id < self.NUM_SESSIONS:
+            if current_session_id == 0:
+                ## Assume vehicle has already entered the area
+                self.reserve_entry_exit(current_session_id)
+            else:
+                ## check if vehicle is at entry
+                if self.is_at_exit():
+                    current_session_id += 1
+                    self.reserve_entry_exit(current_session_id)
+            
             # Apply control
-            session = self.sessions[current_session_id]
-        
-            vel, steer = self.control_update(session['limits'], steer_rate=True if self.STATE_DIMS == 5 else False)
-            self.steer = steer
-            # Send control to vehicle
-            pass
+            if self.sessions[current_session_id]['limits']:        
+                vel, steer = self.control_update(self.sessions[current_session_id]['limits'], steer_rate=True if self.STATE_DIMS == 5 else False)
+                self.steer = steer
+                # Send control to vehicle
+                pass
         
             
             # Status updates
@@ -223,26 +290,15 @@ class Vehicle:
                 # Publish state
                 if id >= current_session_id:
                     self.sessions[id]['states_pub'].publish(self.state)
-                # Update entry time
-                if id == current_session_id:
-                    pass
-                elif id == current_session_id + 1:
-                    self.sessions[id]['earliest_entry'] = self.sessions[id-1]['earliest_exit']
-                    self.sessions[id]['latest_entry'] = self.sessions[id-1]['latest_exit']
-                    self.sessions[id]['entry_time'] = (self.sessions[id]['earliest_entry']+self.sessions[id]['latest_entry'])/2
-                    notify_res = self.sessions[id]['notify_srv'](self.sessions[id]['entry_time'])
-                    if not notify_res.success:
-                        rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
-                    else:
-                        self.sessions[id]['exit_time'] = self.sessions[id]['entry_time'] + rospy.Duration(notify_res.transit_time)
+                # Update arrival time and notify ITS
+                pass
                     
                     
                     
                     
                     
-            # Check if session is over
-            pass
-            current_session_id += 1
+            # Update zone flag
+            self.update_zone_flag()
 
             # Sleep
             self.rate.sleep()
