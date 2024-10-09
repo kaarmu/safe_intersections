@@ -103,7 +103,7 @@ class Vehicle:
     ENTRY_HEADINGS = np.linspace(0, 2*np.pi, NUM_ENTRIES, endpoint=False)
     EXIT_HEADINGS = np.linspace(0, 2*np.pi, NUM_EXITS, endpoint=False)
     MAX_ENTRY_DELTA = np.pi/4
-    ENTRY_TIMES = np.arange(0, NUM_SESSIONS*LOOP_TIME, LOOP_TIME)
+    ARRIVAL_TIMES = np.arange(0, NUM_SESSIONS*LOOP_TIME, LOOP_TIME)
     # EXIT_TIMES = np.arange(LOOP_TIME, NUM_SESSIONS*LOOP_TIME+LOOP_TIME, LOOP_TIME)
     
     LOCATIONS = [
@@ -162,15 +162,15 @@ class Vehicle:
             self.sessions[id]['limits'] = limits.reshape(self.LIMITS_SHAPE)
             
         name = f'{self.NAME}_{id}'
-        entry_time = self.init_time + rospy.Duration(self.ENTRY_TIMES[id])
+        arrival_time = self.init_time + rospy.Duration(self.ARRIVAL_TIMES[id])
         ## Connect to LTMS
-        resp = self.connect_srv(name, entry_time)
+        resp = self.connect_srv(name, arrival_time)
         if not resp.success:
             rospy.logerr(f'Failed to connect to LTMS: {resp.message}')
             return
         ## Set up session
         self.sessions[id]['name'] = name
-        self.sessions[id]['entry_time'] = entry_time
+        self.sessions[id]['arrival_time'] = arrival_time
         self.sessions[id]['its_id'] = resp.its_id
         self.sessions[id]['states_pub'] = rospy.Publisher(f'{name}/states', VehicleStateMsg, queue_size=1)
         self.sessions[id]['notify_srv'] = rospy.ServiceProxy(f'{resp.its_id}/notify', Notify)
@@ -178,11 +178,11 @@ class Vehicle:
         self.sessions[id]['limits_sub'] = rospy.Subscriber(f'{resp.its_id}/limits', bytes, limits_cb)
         self.sessions[id]['valid'] = True
         ## Notify ITS
-        notify_res = self.sessions[id]['notify_srv'](entry_time)
+        notify_res = self.sessions[id]['notify_srv'](arrival_time)
         if not notify_res.success:
             rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
             return
-        self.sessions[id]['exit_time'] = entry_time + rospy.Duration(notify_res.transit_time)
+        self.sessions[id]['departure_time'] = arrival_time + rospy.Duration(notify_res.transit_time)
     
     def control_update(self, limits_mask, steer_rate=False):
         if not steer_rate:
@@ -232,11 +232,10 @@ class Vehicle:
             self.in_zone = False
         
     def reserve_entry_exit(self, id):
-        # Fix timing issues: Store all times in absolute time, and convert to relative time when reserving
         name = self.sessions[id]['name']
         time_ref = rospy.Time.now()
-        earliest_entry = 0.0 if id == 0 else self.sessions[id-1]['earliest_exit']
-        latest_entry = self.LOOP_TIME if id == 0 else self.sessions[id-1]['latest_exit']
+        earliest_entry = time_ref if id == 0 else self.sessions[id-1]['earliest_exit']
+        latest_entry = time_ref + self.LOOP_TIME if id == 0 else self.sessions[id-1]['latest_exit']
         entry = 'init' if id == 0 else self.sessions[id-1]['exit_location']
         exit = self.choose_exit(entry)
         # Fill session
@@ -245,11 +244,11 @@ class Vehicle:
         self.sessions[id]['earliest_entry'] = res.earliest_entry
         self.sessions[id]['latest_entry'] = res.latest_entry
         # Reserve request
-        req = Reserve.Request(name, entry, exit, time_ref, earliest_entry, latest_entry)
+        req = Reserve.Request(name, entry, exit, time_ref, earliest_entry-time_ref, latest_entry-time_ref)
         res = self.sessions[id]['reserve_srv'](req)
         if res.success:
-            self.sessions[id]['earliest_exit'] = res.earliest_exit
-            self.sessions[id]['latest_exit'] = res.latest_exit
+            self.sessions[id]['earliest_exit'] = res.time_ref + res.earliest_exit
+            self.sessions[id]['latest_exit'] = res.time_ref + res.latest_exit
             return True
         else:
             rospy.logerr(f'Failed to reserve entry/exit: {res.message}')           
@@ -287,15 +286,17 @@ class Vehicle:
             
             # Status updates
             for id in range(self.NUM_SESSIONS):
-                # Publish state
                 if id >= current_session_id:
+                    # Publish state
                     self.sessions[id]['states_pub'].publish(self.state)
-                # Update arrival time and notify ITS
-                pass
-                    
-                    
-                    
-                    
+                if id > current_session_id:
+                    # Update arrival time and notify ITS
+                    self.sessions[id]['arrival_time'] = self.sessions[id-1]['departure_time']
+                    notify_res = self.sessions[id]['notify_srv'](self.sessions[id]['arrival_time'])
+                    if not notify_res.success:
+                        rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
+                        return
+                    self.sessions[id]['departure_time'] = self.sessions[id]['arrival_time'] + rospy.Duration(notify_res.transit_time)
                     
             # Update zone flag
             self.update_zone_flag()
