@@ -57,7 +57,9 @@ catkin_python_setup()
 # Generate services in the 'srv' folder
 add_service_files(
   FILES
-  ReserveCorridor.srv
+  Connect.srv
+  Notify.srv
+  Reserve.srv
   SafeInput.srv
 )
 
