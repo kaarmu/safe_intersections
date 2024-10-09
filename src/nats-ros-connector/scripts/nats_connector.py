@@ -2,8 +2,34 @@
 import rospy
 import asyncio
 import json
+from functools import wraps
 from nats_ros_connector.srv import String
 from nats_ros_connector.nats_client import NATSClient
+
+def service_wrp(srv_cls, method=False):
+    Req  = srv_cls._request_class
+    Resp = srv_cls._response_class
+    cond = lambda args, kwds: (not kwds 
+                               and len(args) == 1 
+                               and isinstance(args[0], Req))
+    def decorator(f):
+        if method:
+            @wraps(f)
+            def wrapper(self, *args, **kwds):
+                req = (args[0] if cond(args, kwds) else Req(*args, **kwds))
+                resp = Resp()
+                f(self, req, resp)
+                return resp
+        else:
+            @wraps(f)
+            def wrapper(*args, **kwds):
+                req = (args[0] if cond(args, kwds) else Req(*args, **kwds))
+                resp = Resp()
+                resp = Resp()
+                f(req, resp)
+                return resp
+        return wrapper
+    return decorator
 
 
 def load_param(name, default_value=None, is_required=False):
@@ -96,10 +122,10 @@ if __name__ == "__main__":
     # Start NATS Client
     event_loop.create_task(nats_client.run())
 
-    rospy.Service('/nats/new_subscriber', String, lambda msg: nats_client.new_subscriber(msg.data))
-    rospy.Service('/nats/new_publisher', String, lambda msg: nats_client.new_publisher(msg.data))
-    rospy.Service('/nats/new_service', String, lambda msg: nats_client.new_service(msg.data))
-    rospy.Service('/nats/new_serviceproxy', String, lambda msg: nats_client.new_serviceproxy(**json.loads(msg.data)))
+    rospy.Service('/nats/new_subscriber', String, service_wrp(String)(lambda req, resp: nats_client.new_subscriber(req.data)))
+    rospy.Service('/nats/new_publisher', String, service_wrp(String)(lambda req, resp: nats_client.new_publisher(req.data)))
+    rospy.Service('/nats/new_service', String, service_wrp(String)(lambda req, resp: nats_client.new_service(req.data)))
+    rospy.Service('/nats/new_serviceproxy', String, service_wrp(String)(lambda req, resp: nats_client.new_serviceproxy(**json.loads(req.data))))
 
     # Create shutdown task
     shut_down_task = event_loop.create_task(await_shutdown(nats_client))

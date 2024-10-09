@@ -11,9 +11,13 @@ from nats_ros_connector.nats_service import NATSService
 class NatsMgr:
 
     def __init__(self):
+        rospy.wait_for_service('/nats/new_subscriber')
         self._subscriber_pub = rospy.ServiceProxy('/nats/new_subscriber', String)
+        rospy.wait_for_service('/nats/new_publisher')
         self._publisher_pub = rospy.ServiceProxy('/nats/new_publisher', String)
+        rospy.wait_for_service('/nats/new_service')
         self._service_pub = rospy.ServiceProxy('/nats/new_service', String)
+        rospy.wait_for_service('/nats/new_serviceproxy')
         self._serviceproxy_pub = rospy.ServiceProxy('/nats/new_serviceproxy', String)
 
     def new_subscriber(self, name, *args, **kwds):
