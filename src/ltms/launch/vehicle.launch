@@ -20,6 +20,10 @@
     <!-- Start map_server -->
     <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
+    <node name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
+        <param name="host" value="nats://host.docker.internal:4222" />
+    </node>
+
     <!-- Start vehicle node -->
     <node name="$(arg name)" pkg="ltms" type="vehicle.py" output="screen">
       <rosparam subst_value="true">

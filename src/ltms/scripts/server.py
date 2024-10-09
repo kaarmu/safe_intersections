@@ -165,7 +165,7 @@ class Server:
 
         ## Advertise services
 
-        self.nats_mgr.new_service('~connect', Connect, self.connect_srv)
+        self.nats_mgr.new_service('/connect', Connect, self.connect_srv)
 
         ## Node initialized
 

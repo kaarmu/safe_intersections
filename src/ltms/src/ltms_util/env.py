@@ -40,8 +40,8 @@ def create_chaos(grid, *envs):
 
     if 'center' in envs_sch:
         out['center'] = shp.rectangle(grid, axes=[X, Y],
-                                      target_min=[X0 + 0.0*XN, Y0 + 0.0*YN],
-                                      target_max=[X0 + 0.0*XN, Y0 + 0.0*YN])
+                                      target_min=[X0 - 0.05*XN, Y0 - 0.05*YN],
+                                      target_max=[X0 + 0.05*XN, Y0 + 0.05*YN])
 
     if 'center_w' in envs_sch:
         out['center_w'] = shp.intersection(
