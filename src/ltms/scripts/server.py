@@ -151,17 +151,17 @@ class Server:
         self.sessions_lock = RLock()
         self.sessions = {}
 
-        def clean_reservations_tmr(event):
+        def clean_sessions_tmr(event):
             now = datetime.now().replace(microsecond=0)
-            for id, reservation in self.get_reservations():
-                if reservation['time_ref'] + timedelta(seconds=self.TIME_HORIZON) < now:
-                    self.reservations.pop(id, None)
-        rospy.Timer(rospy.Duration(1), clean_reservations_tmr)
+            with self.sessions_lock:
+                for id_, sess in self.get_sessions:
+                    if sess['session_timeout'] < now:
+                        self.sessions.pop(id_)
+        rospy.Timer(rospy.Duration(1), clean_sessions_tmr)
 
         ## Advertise services
 
-        rospy.Service('~connect', Connect, )
-        rospy.Service('~reserve', ReserveCorridor, self.reserve_srv)
+        rospy.Service('~connect', Connect, self.connect_srv)
 
         ## Node initialized
 
@@ -333,7 +333,7 @@ class Server:
                     rospy.Publisher(f'/connz/{its_id}/limits', bytes)
                 
                 self.sessions[usr_id]['UserState'] = \
-                    rospy.Subscriber(f'/connz/{usr_id}/state', StateMsg, ...)
+                    rospy.Subscriber(f'/connz/{usr_id}/state', StateMsg, state_cb)
 
         arrival_time = datetime.fromisoformat(req.arrival_time)
         session_timeout = arrival_time + self.SESSION_TIMEOUT
