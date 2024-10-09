@@ -100,14 +100,6 @@ class Vehicle:
     elif STATE_DIMS == 5:
         ACC_GRID, STEER_RATE_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER_RATE, MAX_STEER_RATE))
     
-    NUM_ENTRIES = 8
-    NUM_EXITS = 4
-    ENTRY_HEADINGS = np.linspace(0, 2*np.pi, NUM_ENTRIES, endpoint=False)
-    EXIT_HEADINGS = np.linspace(0, 2*np.pi, NUM_EXITS, endpoint=False)
-    MAX_ENTRY_DELTA = np.pi/4
-    ARRIVAL_TIMES = np.arange(0, NUM_SESSIONS*LOOP_TIME, LOOP_TIME)
-    # EXIT_TIMES = np.arange(LOOP_TIME, NUM_SESSIONS*LOOP_TIME+LOOP_TIME, LOOP_TIME)
-    
     LOCATIONS = [
         'center_e', 'center_ene', 'center_ne', 'center_nne',
         'center_n', 'center_nnw', 'center_nw', 'center_wnw',
@@ -171,6 +163,7 @@ class Vehicle:
             limits = np.frombuffer(msg.data, dtype=np.float32)
             self.sessions[id]['limits'] = limits.reshape(self.LIMITS_SHAPE)
             
+        self.current_sessions.append(id)
         name = f'{self.NAME}_{id}'
         arrival_time = self.start_time if id == 0 else self.sessions[id-1]['departure_time']
         ## Connect to LTMS
@@ -244,14 +237,11 @@ class Vehicle:
         else:
             return False
         
-    def is_in_zone(self, zone=(0, 0), radius=0.25):
-        return np.linalg.norm([self.state.x - zone[0], self.state.y - zone[1]]) < radius
-        
     def update_sessions(self): 
         if self.is_entering_zone():
-            self.current_sessions.pop(0)
+            self.current_sessions.remove(self.active_session_id)
+            self.reserved_sessions.remove(self.active_session_id)
             self.active_session_id += 1
-            self.current_sessions.append(self.active_session_id + self.NUM_SESSIONS - 1)
             self.init_session(self.active_session_id + self.NUM_SESSIONS - 1)
         else:
             self.is_exiting_zone()
