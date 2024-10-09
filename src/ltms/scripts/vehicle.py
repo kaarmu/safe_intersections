@@ -9,16 +9,8 @@ from threading import Thread
 from queue import SimpleQueue
 
 # SVEA imports
-from svea.states import VehicleState
-from svea.interfaces import LocalizationInterface, ActuationInterface, PlannerInterface
-from svea.controllers.pure_pursuit import PurePursuitController
-from svea.data import RVIZPathHandler
-from svea.simulators.sim_SVEA import SimSVEA
-from svea.models.bicycle import SimpleBicycleModel
-from svea_msgs.msg import lli_ctrl
+from svea.interfaces import ActuationInterface
 from svea_msgs.msg import VehicleState as VehicleStateMsg
-from svea_mocap.mocap import MotionCaptureInterface
-from svea_planners.astar import AStarPlanner, AStarWorld
 
 # ROS imports
 import rospy
@@ -77,6 +69,18 @@ def load_param(name, value=None):
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, value)
 
+_LOCATIONS = [
+    'center_e', 'center_ene', 'center_ne', 'center_nne',
+    'center_n', 'center_nnw', 'center_nw', 'center_wnw',
+    'center_w', 'center_wsw', 'center_sw', 'center_ssw',
+    'center_s', 'center_ese', 'center_se', 'center_sse',
+]
+_PERMITTED_ROUTES = {
+    (_entry, _exit): ('outside',)
+    for _entry in _LOCATIONS
+    for _exit in set(_LOCATIONS) - set(around(_LOCATIONS, _entry, 4)) # flip
+}
+
 class Vehicle:
     
     NUM_SESSIONS = 5
@@ -100,25 +104,14 @@ class Vehicle:
     elif STATE_DIMS == 5:
         ACC_GRID, STEER_RATE_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER_RATE, MAX_STEER_RATE))
     
-    LOCATIONS = [
-        'center_e', 'center_ene', 'center_ne', 'center_nne',
-        'center_n', 'center_nnw', 'center_nw', 'center_wnw',
-        'center_w', 'center_wsw', 'center_sw', 'center_ssw',
-        'center_s', 'center_ese', 'center_se', 'center_sse',
-    ]
-    PERMITTED_ROUTES = {
-        (_entry, _exit): ('outside',)
-        for _entry in LOCATIONS
-        for _exit in set(LOCATIONS) - set(around(LOCATIONS, _entry, 4)) # flip
-    }
-
-    ENTRY_LOCATIONS = LOCATIONS
-    EXIT_LOCATIONS = LOCATIONS
-    LOCATIONS += ['outside']
-    PERMITTED_ROUTES.update({
-        ('init', _exit): ('outside',)
+    ENTRY_LOCATIONS = _LOCATIONS + ['init']
+    EXIT_LOCATIONS = _LOCATIONS
+    LOCATIONS = _LOCATIONS + ['outside']
+    PERMITTED_ROUTES = dict(list(_PERMITTED_ROUTES.items()) + [
+        (('init', _exit), ('outside',))
         for _exit in 'center_ne center_ene center_e'.split()
-    })
+    ])
+
     
     LIMITS_SHAPE = (50, 50)
 
@@ -153,7 +146,7 @@ class Vehicle:
         self.nats_mgr = NatsMgr()
 
         ## Create service proxies
-        self.connect_srv = self.nats_mgr.new_serviceproxy('/connz/connect', Connect)
+        self.connect_srv = self.nats_mgr.new_serviceproxy('/connect', Connect)
 
         ## Node initialized
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
@@ -291,7 +284,7 @@ class Vehicle:
         self.current_sessions = list(range(self.NUM_SESSIONS))
         self.sessions = {}
         for id in self.current_sessions:
-            self.init_session(id, self.start_time)
+            self.init_session(id)
             
         self.active_session_id = self.current_sessions[0]
         
