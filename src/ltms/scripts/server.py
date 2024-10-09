@@ -13,13 +13,16 @@ from contextlib import contextmanager
 
 import rospy
 from ltms.srv import Connect, Notify, Reserve
-from svea_msgs.msg import State as StateMsg
+from svea_msgs.msg import VehicleState as StateMsg
 
 import jax.numpy as jnp
 
 import hj_reachability as hj
 import hj_reachability.shapes as shp
 from ltms_util import Solver, create_chaos
+from nats_ros_connector.nats_client import NatsMgr
+
+from std_msgs.msg import String
 
 def load_param(name, value=None):
     """Function used to get parameters from ROS parameter server
@@ -67,6 +70,18 @@ def around(l, e, n):
     N = len(l)
     return [l[(i+j) % N] for j in range(-n, n+1)]
 
+_LOCATIONS = [
+    'center_e', 'center_ene', 'center_ne', 'center_nne',
+    'center_n', 'center_nnw', 'center_nw', 'center_wnw',
+    'center_w', 'center_wsw', 'center_sw', 'center_ssw',
+    'center_s', 'center_ese', 'center_se', 'center_sse',
+]
+_PERMITTED_ROUTES = {
+    (_entry, _exit): ('outside',)
+    for _entry in _LOCATIONS
+    for _exit in set(_LOCATIONS) - set(around(_LOCATIONS, _entry, 4)) # flip
+}
+
 class Server:
 
     AVOID_MARGIN = 0.4
@@ -79,25 +94,13 @@ class Server:
     TRANSIT_TIME = 5 # [s] made up, roughly accurate
     COMPUTE_TIME = 3 # [s] made up, roughly accurate
 
-    LOCATIONS = [
-        'center_e', 'center_ene', 'center_ne', 'center_nne',
-        'center_n', 'center_nnw', 'center_nw', 'center_wnw',
-        'center_w', 'center_wsw', 'center_sw', 'center_ssw',
-        'center_s', 'center_ese', 'center_se', 'center_sse',
-    ]
-    PERMITTED_ROUTES = {
-        (_entry, _exit): ('outside',)
-        for _entry in LOCATIONS
-        for _exit in set(LOCATIONS) - set(around(LOCATIONS, _entry, 4)) # flip
-    }
-
-    ENTRY_LOCATIONS = LOCATIONS + ['init']
-    EXIT_LOCATIONS = LOCATIONS
-    LOCATIONS += ['outside']
-    PERMITTED_ROUTES.update({
+    ENTRY_LOCATIONS = _LOCATIONS + ['init']
+    EXIT_LOCATIONS = _LOCATIONS
+    LOCATIONS = _LOCATIONS + ['outside']
+    PERMITTED_ROUTES = _PERMITTED_ROUTES | {
         ('init', _exit): ('outside',)
         for _exit in 'center_ne center_ene center_e'.split()
-    })
+    }
 
     def __init__(self):
 
@@ -114,20 +117,17 @@ class Server:
 
         self.MODEL = load_param('~model', 'Bicycle4D')
         self.MODEL = vars(hj.systems)[self.MODEL]
-        
-        self.MIN_BOUNDS = load_param('~min_bounds', [-1.5, -1.5, -np.pi, +0.0])
-        self.MIN_BOUNDS = np.array(self.MIN_BOUNDS)
-        
-        self.MAX_BOUNDS = load_param('~max_bounds', [+1.5, +1.5, +np.pi, +0.6])
-        self.MAX_BOUNDS = np.array(self.MAX_BOUNDS)
 
         self.GRID_SHAPE = load_param('~grid_shape', [31, 31, 25, 7])
-        self.GRID_SHAPE = tuple(self.GRID_SHAPE)
+        self.GRID_SHAPE = tuple(map(int, self.GRID_SHAPE))
 
-        # self.min_bounds = np.array([-1.5, -1.5, -np.pi, -np.pi/5, +0.0])
-        # self.max_bounds = np.array([+1.5, +1.5, +np.pi, +np.pi/5, +0.6])
-        # self.grid_shape = (31, 31, 25, 5, 7)
-        # self.model = hj.systems.Bicycle5D
+        self.MIN_BOUNDS = load_param('~min_bounds', [-1.5, -1.5, -np.pi, +0.0])
+        self.MIN_BOUNDS = np.array([eval(x) if isinstance(x, str) else x for x in self.MIN_BOUNDS])
+        
+        self.MAX_BOUNDS = load_param('~max_bounds', [+1.5, +1.5, +np.pi, +0.6])
+        self.MAX_BOUNDS = np.array([eval(x) if isinstance(x, str) else x for x in self.MAX_BOUNDS])
+
+        self.nats_mgr = NatsMgr()
 
         ## Create simulators, models, managers, etc.
 
@@ -137,8 +137,8 @@ class Server:
         self.solver = Solver(grid=self.grid, 
                              time_step=self.TIME_STEP,
                              time_horizon=self.TIME_HORIZON,
-                             accuracy='medium',
-                             dynamics=dict(cls=self.model,
+                             accuracy='low',
+                             dynamics=dict(cls=self.MODEL,
                                            min_steer=-pi * 5/4, 
                                            max_steer=+pi * 5/4,
                                            min_accel=-0.5, 
@@ -156,7 +156,11 @@ class Server:
             with self.sessions_lock:
                 for id_, sess in self.get_sessions:
                     if sess['session_timeout'] < now:
-                        self.sessions.pop(id_)
+                        sess = self.sessions.pop(id_)
+                        sess['Notify'].shutdown()
+                        sess['Reserve'].shutdown()
+                        sess['UserState'].unregister()
+                        sess['DrivingLimits'].unregister()
         rospy.Timer(rospy.Duration(1), clean_sessions_tmr)
 
         ## Advertise services
@@ -177,7 +181,7 @@ class Server:
                 out[loc] = np.load(filename, allow_pickle=True)
                 print(f'Loading {filename}')
             else:
-                out.update(create_4way(self.grid, loc))
+                out.update(create_chaos(self.grid, loc))
                 print(f'Saving {filename}')
                 np.save(filename, out[loc], allow_pickle=True)
         print('Environment done.')
@@ -288,7 +292,7 @@ class Server:
 
             mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
 
-            limits_msg = mask.tobytes()
+            limits_msg = String(mask.tobytes())
             self.sessions[usr_id]['DrivingLimits'].publish(limits_msg)
 
         @service_wrp(Reserve)
@@ -330,17 +334,17 @@ class Server:
             
             with self.sessions_lock:
                 self.sessions[usr_id]['DrivingLimits'] = \
-                    rospy.Publisher(f'/connz/{its_id}/limits', bytes)
+                    self.nats_mgr.new_publisher(f'/connz/{its_id}/limits', String)
                 
                 self.sessions[usr_id]['UserState'] = \
-                    rospy.Subscriber(f'/connz/{usr_id}/state', StateMsg, state_cb)
+                    self.nats_mgr.new_subscriber(f'/connz/{usr_id}/state', StateMsg, state_cb)
 
         arrival_time = datetime.fromisoformat(req.arrival_time)
         session_timeout = arrival_time + self.SESSION_TIMEOUT
 
         self.sessions_add(usr_id,
-                          Notify=rospy.Service(f'/connz/{its_id}/notify', Notify, notify_srv),
-                          Reserve=rospy.Service(f'/connz/{its_id}/reserve', Reserve, reserve_srv),
+                          Notify=self.nats_mgr.new_service(f'/connz/{its_id}/notify', Notify, notify_srv),
+                          Reserve=self.nats_mgr.new_service(f'/connz/{its_id}/reserve', Reserve, reserve_srv),
                           self=its_id, user=usr_id,
                           arrival_time=arrival_time,
                           session_timeout=session_timeout,

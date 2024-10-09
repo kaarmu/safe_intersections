@@ -4,7 +4,7 @@ from time import time, sleep
 import hj_reachability as hj
 
 from .rc import RC
-from .env import create_4way
+from .env import create_4way, create_chaos
 from .solver import *
 
 from .bob import Bob

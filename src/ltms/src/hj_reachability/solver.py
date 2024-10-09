@@ -229,6 +229,7 @@ def solve(solver_settings, dynamics, grid, timeline, target_vf, constraint_vf=No
 #         def scan(f, init, xs):
 #             carry, ys = init, []
 #             for x in xs:
+#                 breakpoint()
 #                 carry, y = f(carry, x)
 #                 ys.append(y)
 #             return np.stack(ys)
@@ -253,7 +254,7 @@ def solve(solver_settings, dynamics, grid, times, target, constraint=None, progr
         
     is_target_invariant = shp.is_invariant(grid, times, target)
     is_constraint_invariant = shp.is_invariant(grid, times, constraint)
-    
+
     ctx = (_try_get_progress_bar(times[0], times[-1]) if progress_bar is True else
            contextlib.nullcontext(progress_bar))
     with ctx as bar:

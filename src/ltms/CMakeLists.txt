@@ -60,7 +60,10 @@ add_service_files(
   Connect.srv
   Notify.srv
   Reserve.srv
+<<<<<<< HEAD
   SafeInput.srv
+=======
+>>>>>>> 22f8f4d (crunch)
 )
 
 ## Generate actions in the 'action' folder

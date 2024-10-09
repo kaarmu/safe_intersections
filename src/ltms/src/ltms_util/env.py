@@ -5,7 +5,10 @@ import hj_reachability.shapes as shp
 def create_chaos(grid, *envs):
     out = {}
 
-    X, Y, H, D, V = range(grid.ndim)
+    if grid.ndim == 5:
+        X, Y, H, D, V = range(grid.ndim)
+    elif grid.ndim == 4:
+        X, Y, H, V = range(grid.ndim)
 
     X0 = grid.domain.lo[X]
     Y0 = grid.domain.lo[Y]

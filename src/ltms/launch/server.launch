@@ -16,6 +16,12 @@
     <!-- Start server node -->
     <node name="ltms" pkg="ltms" type="server.py" output="screen">
       <param name="name"      value="ltms"/>
+      <rosparam>
+        model: Bicycle5D
+        min_bounds: [-1.5, -1.5, -pi, -pi/5, +0.0]
+        max_bounds: [+1.5, +1.5, +pi, +pi/5, +0.6]
+        grid_shape: [31, 31, 25, 5, 7]
+      </rosparam>
       <param name="data_dir"  value="$(find ltms)/data"/>
     </node>
 

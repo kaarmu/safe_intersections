@@ -11,6 +11,15 @@ import hj_reachability.shapes as shp
 from .rc import RC
 from .util import iterflat, setdefaults
 
+def trybreak(f):
+    def wrapper(*args, **kwds):
+        try:
+            return f(*args, **kwds)
+        except Exception:
+            breakpoint()
+            return f(*args, **kwds)
+    return wrapper
+        
 
 def new_timeline(target_time, start_time=0, time_step=0.2):
     assert time_step > 0
@@ -150,7 +159,7 @@ class Solver:
 
         return np.array(spatial_deriv)
 
-
+    @trybreak
     def brs(self, times, target, constraints=None, *, mode='reach', interactive=True):
         jnp = hj.solver.jnp
         times = -jnp.asarray(times)
@@ -172,6 +181,7 @@ class Solver:
         values = jnp.flip(values, axis=0)
         return np.asarray(values)
 
+    @trybreak
     def frs(self, times, target, constraints=None, *, mode='avoid', interactive=True):
         jnp = hj.solver.jnp
         times = jnp.asarray(times)
