@@ -29,7 +29,9 @@ class NatsMgr:
         return rospy.Service(name, *args, **kwds)
 
     def new_serviceproxy(self, name, type, *args, **kwds):
+        print('connecting to service:', name)
         self._serviceproxy_pub.publish(String(json.dumps({'name': name, 'type': type._type})))
+        rospy.wait_for_service(name)
         return rospy.ServiceProxy(name, type, *args, **kwds)
 
 
