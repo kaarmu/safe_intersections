@@ -154,6 +154,12 @@ class NATSClient:
             self.new_serviceproxy(service_dict['name'],
                                   service_dict['type'])
 
+        rospy.Service('/nats/new_subscriber', String, service_wrp(String)(lambda req, resp: nats_client.new_subscriber(req.data)))
+        rospy.Service('/nats/new_publisher', String, service_wrp(String)(lambda req, resp: nats_client.new_publisher(req.data)))
+        rospy.Service('/nats/new_service', String, service_wrp(String)(lambda req, resp: nats_client.new_service(req.data)))
+        rospy.Service('/nats/new_serviceproxy', String, service_wrp(String)(lambda req, resp: nats_client.new_serviceproxy(**json.loads(req.data))))
+
+
     def new_subscriber(self, topic_name):
         self.event_loop.create_task(NATSSubscriber(self.nc, topic_name).run())
 

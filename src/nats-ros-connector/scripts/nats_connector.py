@@ -121,12 +121,6 @@ if __name__ == "__main__":
     )
     # Start NATS Client
     event_loop.create_task(nats_client.run())
-
-    rospy.Service('/nats/new_subscriber', String, service_wrp(String)(lambda req, resp: nats_client.new_subscriber(req.data)))
-    rospy.Service('/nats/new_publisher', String, service_wrp(String)(lambda req, resp: nats_client.new_publisher(req.data)))
-    rospy.Service('/nats/new_service', String, service_wrp(String)(lambda req, resp: nats_client.new_service(req.data)))
-    rospy.Service('/nats/new_serviceproxy', String, service_wrp(String)(lambda req, resp: nats_client.new_serviceproxy(**json.loads(req.data))))
-
     # Create shutdown task
     shut_down_task = event_loop.create_task(await_shutdown(nats_client))
     # Run the event loop until the shutdown task completes
