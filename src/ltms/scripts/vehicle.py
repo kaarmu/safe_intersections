@@ -27,6 +27,7 @@ import message_filters as mf
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Path
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
+from nats_ros_connector.nats_client import NatsMgr
 
 import tf2_ros
 import tf2_geometry_msgs
@@ -153,9 +154,14 @@ class Vehicle:
         self.steer = 0.0
         self.in_zone = False
         self.reserved_sessions = []
+        
+        # init actuator interface
+        self.actuator = ActuationInterface(self.NAME)
+        
+        self.nats_mgr = NatsMgr()
 
         ## Create service proxies
-        self.connect_srv = rospy.ServiceProxy('/connz/connect', Connect)
+        self.connect_srv = self.nats_mgr.new_serviceproxy('/connz/connect', Connect)
 
         ## Node initialized
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
@@ -176,10 +182,10 @@ class Vehicle:
         self.sessions[id]['name'] = name
         self.sessions[id]['arrival_time'] = arrival_time
         self.sessions[id]['its_id'] = resp.its_id
-        self.sessions[id]['states_pub'] = rospy.Publisher(f'/connz/{name}/states', VehicleStateMsg, queue_size=1)
-        self.sessions[id]['notify_srv'] = rospy.ServiceProxy(f'/connz/{resp.its_id}/notify', Notify)
-        self.sessions[id]['reserve_srv'] = rospy.ServiceProxy(f'/connz/{resp.its_id}/reserve', Reserve)
-        self.sessions[id]['limits_sub'] = rospy.Subscriber(f'/connz/{resp.its_id}/limits', bytes, limits_cb)
+        self.sessions[id]['states_pub'] = self.nats_mgr.new_publisher(f'/connz/{name}/states', VehicleStateMsg, queue_size=1)
+        self.sessions[id]['notify_srv'] = self.nats_mgr.new_serviceproxy(f'/connz/{resp.its_id}/notify', Notify)
+        self.sessions[id]['reserve_srv'] = self.nats_mgr.new_serviceproxy(f'/connz/{resp.its_id}/reserve', Reserve)
+        self.sessions[id]['limits_sub'] = self.nats_mgr.new_subscriber(f'/connz/{resp.its_id}/limits', bytes, limits_cb)
         self.sessions[id]['valid'] = True
         ## Notify ITS
         notify_res = self.sessions[id]['notify_srv'](arrival_time)
@@ -314,7 +320,7 @@ class Vehicle:
                 self.steer = steer
                 # Send control to vehicle
                 print(f'Velocity: {vel}, Steering: {steer}')
-                # TODO: send control to vehicle
+                self.actuator.send_control(steering=steer, velocity=vel)
         
             # State updates
             for id in self.reserved_sessions:
