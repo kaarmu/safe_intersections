@@ -99,7 +99,7 @@ if __name__ == "__main__":
     rospy.Subscriber('/nats/new_subscriber', String, lambda msg: nats_client.new_subscriber(msg.data))
     rospy.Subscriber('/nats/new_publisher', String, lambda msg: nats_client.new_publisher(msg.data))
     rospy.Subscriber('/nats/new_service', String, lambda msg: nats_client.new_service(msg.data))
-    rospy.Subscriber('/nats/new_serviceproxy', String, lambda msg: nats_client(**json.loads(msg.data)))
+    rospy.Subscriber('/nats/new_serviceproxy', String, lambda msg: nats_client.new_serviceproxy(**json.loads(msg.data)))
 
     # Create shutdown task
     shut_down_task = event_loop.create_task(await_shutdown(nats_client))
