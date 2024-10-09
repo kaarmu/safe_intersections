@@ -2,7 +2,7 @@ import asyncio
 import nats
 import rospy
 import json
-from std_msgs.msg import String
+from nats_ros_connector.srv import String
 from nats_ros_connector.nats_publisher import NATSPublisher
 from nats_ros_connector.nats_subscriber import NATSSubscriber
 from nats_ros_connector.nats_service_proxy import NATSServiceProxy
@@ -11,26 +11,26 @@ from nats_ros_connector.nats_service import NATSService
 class NatsMgr:
 
     def __init__(self):
-        self._subscriber_pub = rospy.Publisher('/nats/new_subscriber', String, queue_size=5)
-        self._publisher_pub = rospy.Publisher('/nats/new_publisher', String, queue_size=5)
-        self._service_pub = rospy.Publisher('/nats/new_service', String, queue_size=5)
-        self._serviceproxy_pub = rospy.Publisher('/nats/new_serviceproxy', String, queue_size=5)
+        self._subscriber_pub = rospy.ServiceProxy('/nats/new_subscriber', String)
+        self._publisher_pub = rospy.ServiceProxy('/nats/new_publisher', String)
+        self._service_pub = rospy.ServiceProxy('/nats/new_service', String)
+        self._serviceproxy_pub = rospy.ServiceProxy('/nats/new_serviceproxy', String)
 
     def new_subscriber(self, name, *args, **kwds):
-        self._subscriber_pub.publish(String(name))
+        self._subscriber_pub(data=(name))
         return rospy.Subscriber(name, *args, **kwds)
 
     def new_publisher(self, name, *args, **kwds):
-        self._publisher_pub.publish(String(name))
+        self._publisher_pub(data=(name))
         return rospy.Publisher(name, *args, **kwds)
 
     def new_service(self, name, *args, **kwds):
-        self._service_pub.publish(String(name))
+        self._service_pub(data=(name))
         return rospy.Service(name, *args, **kwds)
 
     def new_serviceproxy(self, name, type, *args, **kwds):
         print('connecting to service:', name)
-        self._serviceproxy_pub.publish(String(json.dumps({'name': name, 'type': type._type})))
+        self._serviceproxy_pub(data=(json.dumps({'name': name, 'type': type._type})))
         rospy.wait_for_service(name)
         return rospy.ServiceProxy(name, type, *args, **kwds)
 

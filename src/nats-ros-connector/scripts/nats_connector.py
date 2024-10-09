@@ -2,7 +2,7 @@
 import rospy
 import asyncio
 import json
-from std_msgs.msg import String
+from nats_ros_connector.srv import String
 from nats_ros_connector.nats_client import NATSClient
 
 
@@ -96,10 +96,10 @@ if __name__ == "__main__":
     # Start NATS Client
     event_loop.create_task(nats_client.run())
 
-    rospy.Subscriber('/nats/new_subscriber', String, lambda msg: nats_client.new_subscriber(msg.data))
-    rospy.Subscriber('/nats/new_publisher', String, lambda msg: nats_client.new_publisher(msg.data))
-    rospy.Subscriber('/nats/new_service', String, lambda msg: nats_client.new_service(msg.data))
-    rospy.Subscriber('/nats/new_serviceproxy', String, lambda msg: nats_client.new_serviceproxy(**json.loads(msg.data)))
+    rospy.Service('/nats/new_subscriber', String, lambda msg: nats_client.new_subscriber(msg.data))
+    rospy.Service('/nats/new_publisher', String, lambda msg: nats_client.new_publisher(msg.data))
+    rospy.Service('/nats/new_service', String, lambda msg: nats_client.new_service(msg.data))
+    rospy.Service('/nats/new_serviceproxy', String, lambda msg: nats_client.new_serviceproxy(**json.loads(msg.data)))
 
     # Create shutdown task
     shut_down_task = event_loop.create_task(await_shutdown(nats_client))
