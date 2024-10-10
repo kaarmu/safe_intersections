@@ -2,42 +2,81 @@ import asyncio
 import nats
 import rospy
 import json
-from nats_ros_connector.srv import String
+from dataclasses import dataclass
+from nats_ros_connector.srv import ReqRep
 from nats_ros_connector.nats_publisher import NATSPublisher
 from nats_ros_connector.nats_subscriber import NATSSubscriber
 from nats_ros_connector.nats_service_proxy import NATSServiceProxy
 from nats_ros_connector.nats_service import NATSService
 
-class NatsMgr:
+class service:
+    def __init__(self, srv_name, srv_type, srv_cb=None, *, method=False, **kwds):
+        self._name = srv_name
+        self._type = srv_type
+        self._kwds = kwds
 
-    def __init__(self):
-        rospy.wait_for_service('/nats/new_subscriber')
-        self._subscriber_pub = rospy.ServiceProxy('/nats/new_subscriber', String)
-        rospy.wait_for_service('/nats/new_publisher')
-        self._publisher_pub = rospy.ServiceProxy('/nats/new_publisher', String)
-        rospy.wait_for_service('/nats/new_service')
-        self._service_pub = rospy.ServiceProxy('/nats/new_service', String)
-        rospy.wait_for_service('/nats/new_serviceproxy')
-        self._serviceproxy_pub = rospy.ServiceProxy('/nats/new_serviceproxy', String)
+        self._callback = srv_cb
+        self._is_method = method
 
-    def new_subscriber(self, name, *args, **kwds):
-        self._subscriber_pub(data=(name))
-        return rospy.Subscriber(name, *args, **kwds)
+        self._Req = self._type._request_class
+        self._Rep = self._type._response_class
 
-    def new_publisher(self, name, *args, **kwds):
-        self._publisher_pub(data=(name))
-        return rospy.Publisher(name, *args, **kwds)
+    def __call__(self, f):
+        assert self._callback is None, 'Can only set callback once'
+        self._callback = f
+        return self
 
-    def new_service(self, name, *args, **kwds):
-        self._service_pub(data=(name))
-        return rospy.Service(name, *args, **kwds)
+    def _new_req(self, args, kwds):
+        if kwds:            return self._Req(*args, **kwds)
+        if len(args) != 1:  return self._Req(*args, **kwds)
+        return (args[0] if isinstance(args[0], self._Req) else 
+                self._Req(*args, **kwds))
 
-    def new_serviceproxy(self, name, type, *args, **kwds):
-        print('connecting to service:', name)
-        self._serviceproxy_pub(data=(json.dumps({'name': name, 'type': type._type})))
-        rospy.wait_for_service(name)
-        return rospy.ServiceProxy(name, type, *args, **kwds)
+    def register(self):
+        assert self._callback is not None, 'Missing callback'
+        if self._is_method:
+            def handler(self_, *args_, **kwds_):
+                req = self._new_req(args_, kwds_)
+                rep = self._Rep()
+                self._callback(self_, req, rep)
+                return rep
+        else:
+            def handler(self_, *args_, **kwds_):
+                req = self._new_req(args_, kwds_)
+                rep = self._Rep()
+                self._callback(self_, req, rep)
+                return rep
+        self._service = rospy.Service(self._name, self._type, handler, self._kwds)
 
+    def unregister(self):
+        self._service.shutdown()
+        self._service = None
+
+@dataclass
+class NATSConnParams:
+    name=None,
+    pedantic=False,
+    verbose=False,
+    allow_reconnect=True,
+    connect_timeout=2,
+    reconnect_time_wait=2,
+    max_reconnect_attempts=60,
+    ping_interval=120,
+    max_outstanding_pings=2,
+    dont_randomize=False,
+    flusher_queue_size=1024,
+    no_echo=False,
+    tls=None,
+    tls_hostname=None,
+    user=None,
+    password=None,
+    token=None,
+    drain_timeout=30,
+    signature_cb=None,
+    user_jwt_cb=None,
+    user_credentials=None,
+    nkeys_seed=None,
+    srv_req_timeout=None
 
 class NATSClient:
     def __init__(
@@ -48,63 +87,22 @@ class NATSClient:
         services,
         service_proxies,
         event_loop,
-        # NATS Connection parameters
-        name=None,
-        pedantic=False,
-        verbose=False,
-        allow_reconnect=True,
-        connect_timeout=2,
-        reconnect_time_wait=2,
-        max_reconnect_attempts=60,
-        ping_interval=120,
-        max_outstanding_pings=2,
-        dont_randomize=False,
-        flusher_queue_size=1024,
-        no_echo=False,
-        tls=None,
-        tls_hostname=None,
-        user=None,
-        password=None,
-        token=None,
-        drain_timeout=30,
-        signature_cb=None,
-        user_jwt_cb=None,
-        user_credentials=None,
-        nkeys_seed=None,
-        srv_req_timeout=None
+        **kwds,
     ):
         self.host = nats_host
         self.publishers = publishers
         self.subscribers = subscribers
         self.services = services
         self.service_proxies = service_proxies
-        self.tasks = []
         self.event_loop = event_loop
 
+        self._subscribers = {}
+        self._publishers = {}
+        self._services = {}
+        self._service_proxies = {}
+
         # NATS Connection parameters
-        self.name = name
-        self.pedantic = pedantic
-        self.verbose = verbose
-        self.allow_reconnect = allow_reconnect
-        self.connect_timeout = connect_timeout
-        self.reconnect_time_wait = reconnect_time_wait
-        self.max_reconnect_attempts = max_reconnect_attempts
-        self.ping_interval = ping_interval
-        self.max_outstanding_pings = max_outstanding_pings
-        self.dont_randomize = dont_randomize
-        self.flusher_queue_size = flusher_queue_size
-        self.no_echo = no_echo
-        self.tls = tls
-        self.tls_hostname = tls_hostname
-        self.user = user
-        self.password = password
-        self.token = token
-        self.drain_timeout = drain_timeout
-        self.signature_cb = signature_cb
-        self.user_jwt_cb = user_jwt_cb
-        self.user_credentials = user_credentials
-        self.nkeys_seed = nkeys_seed
-        self.srv_req_timeout = srv_req_timeout
+        self.params = NATSConnParams(**kwds)
 
     async def run(self):
         self.nc = await nats.connect(
@@ -114,28 +112,28 @@ class NATSClient:
             reconnected_cb=self._reconnected_cb,
             disconnected_cb=self._disconnected_cb,
             closed_cb=self._closed_cb,
-            name=self.name,
-            pedantic=self.pedantic,
-            verbose=self.verbose,
-            allow_reconnect=self.allow_reconnect,
-            connect_timeout=self.connect_timeout,
-            reconnect_time_wait=self.reconnect_time_wait,
-            max_reconnect_attempts=self.max_reconnect_attempts,
-            ping_interval=self.ping_interval,
-            max_outstanding_pings=self.max_outstanding_pings,
-            dont_randomize=self.dont_randomize,
-            flusher_queue_size=self.flusher_queue_size,
-            no_echo=self.no_echo,
-            tls=self.tls,
-            tls_hostname=self.tls_hostname,
-            user=self.user,
-            password=self.password,
-            token=self.token,
-            drain_timeout=self.drain_timeout,
-            signature_cb=self.signature_cb,
-            user_jwt_cb=self.user_jwt_cb,
-            user_credentials=self.user_credentials,
-            nkeys_seed=self.nkeys_seed
+            name=self.params.name,
+            pedantic=self.params.pedantic,
+            verbose=self.params.verbose,
+            allow_reconnect=self.params.allow_reconnect,
+            connect_timeout=self.params.connect_timeout,
+            reconnect_time_wait=self.params.reconnect_time_wait,
+            max_reconnect_attempts=self.params.max_reconnect_attempts,
+            ping_interval=self.params.ping_interval,
+            max_outstanding_pings=self.params.max_outstanding_pings,
+            dont_randomize=self.params.dont_randomize,
+            flusher_queue_size=self.params.flusher_queue_size,
+            no_echo=self.params.no_echo,
+            tls=self.params.tls,
+            tls_hostname=self.params.tls_hostname,
+            user=self.params.user,
+            password=self.params.password,
+            token=self.params.token,
+            drain_timeout=self.params.drain_timeout,
+            signature_cb=self.params.signature_cb,
+            user_jwt_cb=self.params.user_jwt_cb,
+            user_credentials=self.params.user_credentials,
+            nkeys_seed=self.params.nkeys_seed
         )
         # Register Subscribers
         for topic_name in self.subscribers:
@@ -154,36 +152,72 @@ class NATSClient:
             self.new_serviceproxy(service_dict['name'],
                                   service_dict['type'])
 
-        rospy.Service('/nats/new_subscriber', String, service_wrp(String)(lambda req, resp: nats_client.new_subscriber(req.data)))
-        rospy.Service('/nats/new_publisher', String, service_wrp(String)(lambda req, resp: nats_client.new_publisher(req.data)))
-        rospy.Service('/nats/new_service', String, service_wrp(String)(lambda req, resp: nats_client.new_service(req.data)))
-        rospy.Service('/nats/new_serviceproxy', String, service_wrp(String)(lambda req, resp: nats_client.new_serviceproxy(**json.loads(req.data))))
+        self._client_srv.register()
 
-
-    def new_subscriber(self, topic_name):
-        self.event_loop.create_task(NATSSubscriber(self.nc, topic_name).run())
-
-    def new_publisher(self, topic_name):
-        NATSPublisher(self.nc, topic_name, self.event_loop)
-
-    def new_service(self, service_name):
-        self.event_loop.create_task(NATSService(self.nc, service_name).run())
-
-    def new_serviceproxy(self, name, type):
-        NATSServiceProxy(self.nc, name, type, self.event_loop, self.srv_req_timeout)
+        rospy.spin() # spin ROS in background
 
     async def close(self):
-        print("NATS Connector: CLOSING CONNECTION")
+        rospy.loginfo("NATS Connector: CLOSING CONNECTION")
         await self.nc.close()
 
     async def _disconnected_cb(self):
-        print("NATS Connector: GOT DISCONNECTED")
+        rospy.loginfo("NATS Connector: GOT DISCONNECTED")
 
     async def _reconnected_cb(self):
-        print(f"NATS Connector: GOT RECONNECTED TO {self.nc.connected_url.netloc}")
+        rospy.loginfo(f"NATS Connector: GOT RECONNECTED TO {self.nc.connected_url.netloc}")
 
     async def _error_cb(self, e):
-        print(f"NATS Connector Error: {e}")
+        rospy.loginfo(f"NATS Connector Error: {e}")
 
     async def _closed_cb(self):
-        print("NATS Connector: CLOSED CONNECTION")
+        rospy.loginfo("NATS Connector: CLOSED CONNECTION")
+
+    @service('/nats', ReqRep, method=True)
+    def _client_srv(self, req, rep):
+        reqd = json.loads(req.data)
+        func = getattr(self, reqd['func'])
+        func(*reqd.get('args', []), **reqd.get('kwds', {}))
+
+    ## Subscribers ##
+
+    def new_subscriber(self, name):
+        obj = NATSSubscriber(self.nc, name)
+        self._subscribers[name] = obj
+        self.event_loop.create_task(obj.start())
+
+    def del_subscriber(self, name):
+        obj: NATSSubscriber = self._subscribers.pop(name)
+        self.event_loop.create_task(obj.stop())
+
+    ## Publishers ##
+
+    def new_publisher(self, name):
+        obj = NATSPublisher(self.nc, name, self.event_loop)
+        self._publishers[name] = obj
+        self.event_loop.create_task(obj.start())
+
+    def del_publisher(self, name):
+        obj: NATSPublisher = self._publishers.pop(name)
+        self.event_loop.create_task(obj.stop())
+
+    ## Services ##
+
+    def new_service(self, name):
+        obj = NATSService(self.nc, name)
+        self._services[name] = obj
+        self.event_loop.create_task(obj.start())
+
+    def del_service(self, name):
+        obj: NATSService = self._services.pop(name)
+        self.event_loop.create_task(obj.stop())
+
+    ## Service Proxy ##
+
+    def new_serviceproxy(self, name, type):
+        obj = NATSServiceProxy(self.nc, name, type, self.event_loop, self.params.srv_req_timeout)
+        self._service_proxies[name] = obj
+        self.event_loop.create_task(obj.start())
+    
+    def del_serviceproxy(self, name):
+        obj: NATSServiceProxy = self._service_proxies.pop(name)
+        self.event_loop.create_task(obj.stop())

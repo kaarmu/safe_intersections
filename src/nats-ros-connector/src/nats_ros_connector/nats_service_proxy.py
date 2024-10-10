@@ -73,3 +73,13 @@ class NATSServiceProxy:
         return rosservice.get_service_class_by_name(
             self.service_name_with_slash
         )._response_class()
+
+    async def start(self):
+        # no setup
+        pass
+
+    async def stop(self):
+        # Unregister the ROS service
+        if self.service is not None:
+            self.service.shutdown()
+            self.service = None

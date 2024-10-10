@@ -54,5 +54,15 @@ class NATSService:
                     f"NATS Error when deserializing an incoming service request for [{self.service_name}]: {e}"
                 )
 
-    async def run(self):
-        await self.nc.subscribe(self.service_name_nats, cb=self.nats_msg_cb)
+    async def start(self):
+        self.nats_sub = await self.nc.subscribe(self.service_name_nats, cb=self.nats_msg_cb)
+
+    async def stop(self):
+        # Unsubscribe from the NATS service
+        if self.nats_sub:
+            await self.nats_sub.unsubscribe()
+
+        # Cleanup ROS service-related references
+        self.service_class = None
+        self.service_req_class = None
+        self.service_resp_class = None

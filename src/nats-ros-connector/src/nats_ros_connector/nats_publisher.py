@@ -12,7 +12,7 @@ class NATSPublisher:
 
         self.event_loop = event_loop
         # Use AnyMsg to get a serialized message to be forwarded to another client
-        self.sub = rospy.Subscriber(self.topic_name, rospy.AnyMsg, self.ros_cb)
+        self.ros_sub = rospy.Subscriber(self.topic_name, rospy.AnyMsg, self.ros_cb)
 
     def ros_cb(self, msg):
         asyncio.run_coroutine_threadsafe(self.handle_msg(msg), self.event_loop).result()
@@ -24,3 +24,15 @@ class NATSPublisher:
         buff = BytesIO()
         msg.serialize(buff)
         await self.nc.publish(self.topic_name_nats, buff.getvalue())
+
+    async def start(self):
+        # No explicit setup is needed for NATS publisher
+        pass
+
+    async def stop(self):
+        # Unregister the ROS subscriber
+        if self.ros_sub is not None:
+            self.ros_sub.unregister()
+            self.ros_sub = None
+        
+        # No explicit teardown is needed for NATS publisher

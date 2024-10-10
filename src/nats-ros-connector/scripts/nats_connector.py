@@ -1,36 +1,7 @@
 #! /usr/bin/env python3
 import rospy
 import asyncio
-import json
-from functools import wraps
-from nats_ros_connector.srv import String
 from nats_ros_connector.nats_client import NATSClient
-
-def service_wrp(srv_cls, method=False):
-    Req  = srv_cls._request_class
-    Resp = srv_cls._response_class
-    cond = lambda args, kwds: (not kwds 
-                               and len(args) == 1 
-                               and isinstance(args[0], Req))
-    def decorator(f):
-        if method:
-            @wraps(f)
-            def wrapper(self, *args, **kwds):
-                req = (args[0] if cond(args, kwds) else Req(*args, **kwds))
-                resp = Resp()
-                f(self, req, resp)
-                return resp
-        else:
-            @wraps(f)
-            def wrapper(*args, **kwds):
-                req = (args[0] if cond(args, kwds) else Req(*args, **kwds))
-                resp = Resp()
-                resp = Resp()
-                f(req, resp)
-                return resp
-        return wrapper
-    return decorator
-
 
 def load_param(name, default_value=None, is_required=False):
     if is_required:
