@@ -9,18 +9,15 @@ from math import pi, ceil, floor
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
-from contextlib import contextmanager
 
 import rospy
 from ltms.srv import Connect, Notify, Reserve
 from svea_msgs.msg import VehicleState as StateMsg
 
-import jax.numpy as jnp
-
 import hj_reachability as hj
 import hj_reachability.shapes as shp
 from ltms_util import Solver, create_chaos
-from nats_ros_connector.nats_client import NatsMgr
+from nats_ros_connector.nats_manager import NATSManager
 
 from std_msgs.msg import String
 
@@ -127,7 +124,7 @@ class Server:
         self.MAX_BOUNDS = load_param('~max_bounds', [+1.5, +1.5, +np.pi, +0.6])
         self.MAX_BOUNDS = np.array([eval(x) if isinstance(x, str) else x for x in self.MAX_BOUNDS])
 
-        self.nats_mgr = NatsMgr()
+        self.nats_mgr = NATSManager()
 
         ## Create simulators, models, managers, etc.
 
@@ -157,10 +154,6 @@ class Server:
                 for id_, sess in self.get_sessions:
                     if sess['session_timeout'] < now:
                         sess = self.sessions.pop(id_)
-                        sess['Notify'].shutdown()
-                        sess['Reserve'].shutdown()
-                        sess['UserState'].unregister()
-                        sess['DrivingLimits'].unregister()
         rospy.Timer(rospy.Duration(1), clean_sessions_tmr)
 
         ## Advertise services

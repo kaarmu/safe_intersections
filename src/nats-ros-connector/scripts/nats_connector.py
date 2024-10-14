@@ -8,24 +8,14 @@ def load_param(name, default_value=None, is_required=False):
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, default_value)
 
+async def main():
 
-async def await_shutdown(nats_client):
-    """
-    Sleeps while ROS is running to keep the event loop alive and
-    closes the nats_client connection after ROS shuts down.
-    """
-    # Keep the event loop alive by sleeping
-    while not rospy.is_shutdown():
-        await asyncio.sleep(0.5)
-    # After shutdown close connection
-    await nats_client.close()
-
-
-if __name__ == "__main__":
     # Initialize node
     rospy.init_node("nats_connector")
+
     # Parameters
     host = load_param("~host", is_required=True)
+
     # NATS Connection Params
     # See https://nats-io.github.io/nats.py/modules.html#asyncio-client
     name = load_param("~name", None)
@@ -66,33 +56,42 @@ if __name__ == "__main__":
         services,
         services_proxies,
         event_loop,
-        name,
-        pedantic,
-        verbose,
-        allow_reconnect,
-        connect_timeout,
-        reconnect_time_wait,
-        max_reconnect_attempts,
-        ping_interval,
-        max_outstanding_pings,
-        dont_randomize,
-        flusher_queue_size,
-        no_echo,
-        tls,
-        tls_hostname,
-        user,
-        password,
-        token,
-        drain_timeout,
-        signature_cb,
-        user_jwt_cb,
-        user_credentials,
-        nkeys_seed,
-        srv_req_timeout
+        name=name,
+        pedantic=pedantic,
+        verbose=verbose,
+        allow_reconnect=allow_reconnect,
+        connect_timeout=connect_timeout,
+        reconnect_time_wait=reconnect_time_wait,
+        max_reconnect_attempts=max_reconnect_attempts,
+        ping_interval=ping_interval,
+        max_outstanding_pings=max_outstanding_pings,
+        dont_randomize=dont_randomize,
+        flusher_queue_size=flusher_queue_size,
+        no_echo=no_echo,
+        tls=tls,
+        tls_hostname=tls_hostname,
+        user=user,
+        password=password,
+        token=token,
+        drain_timeout=drain_timeout,
+        signature_cb=signature_cb,
+        user_jwt_cb=user_jwt_cb,
+        user_credentials=user_credentials,
+        nkeys_seed=nkeys_seed,
+        srv_req_timeout=srv_req_timeout
     )
+
     # Start NATS Client
-    event_loop.create_task(nats_client.run())
-    # Create shutdown task
-    shut_down_task = event_loop.create_task(await_shutdown(nats_client))
-    # Run the event loop until the shutdown task completes
-    event_loop.run_until_complete(shut_down_task)
+    await nats_client.setup()
+
+    try:
+        # Keep the event loop alive by sleeping
+        while not rospy.is_shutdown():
+            await asyncio.sleep(0.5)
+    finally:
+        # After shutdown close connection
+        await nats_client.close()
+
+if __name__ == "__main__":
+
+    asyncio.run(main(), debug=True)

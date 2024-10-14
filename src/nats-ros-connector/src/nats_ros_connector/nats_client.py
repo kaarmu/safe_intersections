@@ -2,6 +2,8 @@ import asyncio
 import nats
 import rospy
 import json
+from typing import Optional
+from functools import partial
 from dataclasses import dataclass
 from nats_ros_connector.srv import ReqRep
 from nats_ros_connector.nats_publisher import NATSPublisher
@@ -32,21 +34,17 @@ class service:
         return (args[0] if isinstance(args[0], self._Req) else 
                 self._Req(*args, **kwds))
 
-    def register(self):
+    def register(self, self_=None):
         assert self._callback is not None, 'Missing callback'
-        if self._is_method:
-            def handler(self_, *args_, **kwds_):
-                req = self._new_req(args_, kwds_)
-                rep = self._Rep()
-                self._callback(self_, req, rep)
-                return rep
-        else:
-            def handler(self_, *args_, **kwds_):
-                req = self._new_req(args_, kwds_)
-                rep = self._Rep()
-                self._callback(self_, req, rep)
-                return rep
-        self._service = rospy.Service(self._name, self._type, handler, self._kwds)
+        assert not (self._is_method and self_ is None), 'Require self_ object'
+        callback = (self._callback if not self._is_method else 
+                    partial(self._callback, self_))
+        def handler(req):
+            rep = self._Rep()
+            callback(req, rep)
+            return rep
+        self._service = rospy.Service(self._name, self._type, handler, **self._kwds)
+        rospy.logdebug(f'Service up: {self._name}')
 
     def unregister(self):
         self._service.shutdown()
@@ -54,29 +52,29 @@ class service:
 
 @dataclass
 class NATSConnParams:
-    name=None,
-    pedantic=False,
-    verbose=False,
-    allow_reconnect=True,
-    connect_timeout=2,
-    reconnect_time_wait=2,
-    max_reconnect_attempts=60,
-    ping_interval=120,
-    max_outstanding_pings=2,
-    dont_randomize=False,
-    flusher_queue_size=1024,
-    no_echo=False,
-    tls=None,
-    tls_hostname=None,
-    user=None,
-    password=None,
-    token=None,
-    drain_timeout=30,
-    signature_cb=None,
-    user_jwt_cb=None,
-    user_credentials=None,
-    nkeys_seed=None,
-    srv_req_timeout=None
+    name: str
+    pedantic: bool = False
+    verbose: bool = False
+    allow_reconnect: bool = True
+    connect_timeout: float = 2
+    reconnect_time_wait: float = 2
+    max_reconnect_attempts: int = 60
+    ping_interval: int = 120
+    max_outstanding_pings: int = 2
+    dont_randomize: bool = False
+    flusher_queue_size: int = 1024
+    no_echo: bool = False
+    tls: Optional[str] = None
+    tls_hostname: Optional[str] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+    token: Optional[str] = None
+    drain_timeout: int = 30
+    signature_cb: Optional[callable] = None
+    user_jwt_cb: Optional[callable] = None
+    user_credentials: Optional[str] = None
+    nkeys_seed: Optional[int] = None
+    srv_req_timeout: Optional[int] = None
 
 class NATSClient:
     def __init__(
@@ -103,8 +101,10 @@ class NATSClient:
 
         # NATS Connection parameters
         self.params = NATSConnParams(**kwds)
+        
+        self._client_srv.register(self)
 
-    async def run(self):
+    async def setup(self):
         self.nc = await nats.connect(
             # See https://nats-io.github.io/nats.py/modules.html#asyncio-client
             self.host,
@@ -135,29 +135,42 @@ class NATSClient:
             user_credentials=self.params.user_credentials,
             nkeys_seed=self.params.nkeys_seed
         )
-        # Register Subscribers
+
+        rospy.logdebug('NATS Connector: Registering Subscribers')
         for topic_name in self.subscribers:
-            self.new_subscriber(topic_name)            
+            await self.new_subscriber(topic_name, sync=False)            
 
-        # Register Publishers
+        rospy.logdebug('NATS Connector: Registering Publishers')
         for topic_name in self.publishers:
-            self.new_publisher(topic_name)
+            await self.new_publisher(topic_name, sync=False)
 
-        # Register Services
+        rospy.logdebug('NATS Connector: Registering Services')
         for service_name in self.services:
-            self.new_service(service_name)
+            await self.new_service(service_name, sync=False)
 
-        # Register Service Proxies
+        rospy.logdebug('NATS Connector: Registering Service Proxies')
         for service_dict in self.service_proxies:
-            self.new_serviceproxy(service_dict['name'],
-                                  service_dict['type'])
+            await self.new_serviceproxy(service_dict['name'],
+                                        service_dict['type'],
+                                        sync=False)
 
-        self._client_srv.register()
-
-        rospy.spin() # spin ROS in background
+        rospy.logdebug('NATS Connector: Setup complete')
 
     async def close(self):
         rospy.loginfo("NATS Connector: CLOSING CONNECTION")
+
+        for obj in self._subscribers.values():
+            await obj.stop()
+
+        for obj in self._publishers.values():
+            await obj.stop()
+
+        for obj in self._services.values():
+            await obj.stop()
+
+        for obj in self._service_proxies.values():
+            await obj.stop()
+
         await self.nc.close()
 
     async def _disconnected_cb(self):
@@ -176,48 +189,73 @@ class NATSClient:
     def _client_srv(self, req, rep):
         reqd = json.loads(req.data)
         func = getattr(self, reqd['func'])
-        func(*reqd.get('args', []), **reqd.get('kwds', {}))
+        args = reqd.get('args', [])
+        kwds = reqd.get('kwds', {})
+        kwds.update(sync=True)
+        try:
+            rep.data = json.dumps({
+                'result': func(*args, **kwds),
+            })
+        except Exception as e:
+            rep.data = json.dumps({
+                'err': str(e),
+            })
+
+    def _run(self, coro, sync=True):
+        if not sync:
+            return coro
+        else:
+            fut = asyncio.run_coroutine_threadsafe(coro, self.event_loop)
+            return fut.result()
 
     ## Subscribers ##
 
-    def new_subscriber(self, name):
-        obj = NATSSubscriber(self.nc, name)
-        self._subscribers[name] = obj
-        self.event_loop.create_task(obj.start())
+    def new_subscriber(self, name, *, sync=True):
+        if name not in self._subscribers:
+            obj = NATSSubscriber(self.nc, name)
+            self._subscribers[name] = obj
+            return self._run(obj.start(), sync)
 
-    def del_subscriber(self, name):
-        obj: NATSSubscriber = self._subscribers.pop(name)
-        self.event_loop.create_task(obj.stop())
+    def del_subscriber(self, name, *, sync=True):
+        if name in self._subscribers:
+            obj: NATSSubscriber = self._subscribers.pop(name)
+            self._run(obj.stop(), sync)
 
     ## Publishers ##
 
-    def new_publisher(self, name):
-        obj = NATSPublisher(self.nc, name, self.event_loop)
-        self._publishers[name] = obj
-        self.event_loop.create_task(obj.start())
+    def new_publisher(self, name, *, sync=True):
+        if name not in self._publishers:
+            obj = NATSPublisher(self.nc, name, self.event_loop)
+            self._publishers[name] = obj
+            return self._run(obj.start(), sync)
 
-    def del_publisher(self, name):
-        obj: NATSPublisher = self._publishers.pop(name)
-        self.event_loop.create_task(obj.stop())
+    def del_publisher(self, name, *, sync=True):
+        if name in self._publishers:
+            obj: NATSPublisher = self._publishers.pop(name)
+            self._run(obj.stop(), sync)
 
     ## Services ##
 
-    def new_service(self, name):
-        obj = NATSService(self.nc, name)
-        self._services[name] = obj
-        self.event_loop.create_task(obj.start())
+    def new_service(self, name, *, sync=True):
+        if name not in self._services:
+            obj = NATSService(self.nc, name)
+            self._services[name] = obj
+            self._run(obj.start(), sync=True)
 
-    def del_service(self, name):
-        obj: NATSService = self._services.pop(name)
-        self.event_loop.create_task(obj.stop())
+    def del_service(self, name, *, sync=True):
+        if name in self._services:
+            obj: NATSService = self._services.pop(name)
+            self._run(obj.stop(), sync)
 
     ## Service Proxy ##
 
-    def new_serviceproxy(self, name, type):
-        obj = NATSServiceProxy(self.nc, name, type, self.event_loop, self.params.srv_req_timeout)
-        self._service_proxies[name] = obj
-        self.event_loop.create_task(obj.start())
+    def new_serviceproxy(self, name, type, *, sync=True):
+        if name not in self._service_proxies:
+            obj = NATSServiceProxy(self.nc, name, type, self.event_loop, self.params.srv_req_timeout)
+            self._service_proxies[name] = obj
+            self._run(obj.start(), sync)
     
-    def del_serviceproxy(self, name):
-        obj: NATSServiceProxy = self._service_proxies.pop(name)
-        self.event_loop.create_task(obj.stop())
+    def del_serviceproxy(self, name, *, sync=True):
+        if name in self._service_proxies:
+            obj: NATSServiceProxy = self._service_proxies.pop(name)
+            self._run(obj.stop(), sync)

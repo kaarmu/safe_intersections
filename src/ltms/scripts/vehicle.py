@@ -19,7 +19,7 @@ import message_filters as mf
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Path
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
-from nats_ros_connector.nats_client import NatsMgr
+from nats_ros_connector.nats_manager import NATSManager
 
 import tf2_ros
 import tf2_geometry_msgs
@@ -143,7 +143,7 @@ class Vehicle:
         # init actuator interface
         self.actuator = ActuationInterface(self.NAME)
         
-        self.nats_mgr = NatsMgr()
+        self.nats_mgr = NATSManager()
 
         ## Create service proxies
         self.connect_srv = self.nats_mgr.new_serviceproxy('/connect', Connect)
