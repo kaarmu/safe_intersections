@@ -27,8 +27,9 @@ from std_msgs.msg import String
 def debuggable_lock(name, lock):
     @contextmanager
     def ctx(caller):
-        rospy.logdebug('%s: %s acquired', caller, name)
+        rospy.logdebug('%s: %s acquiring', caller, name)
         with lock:
+            rospy.logdebug('%s: %s acquired', caller, name)
             yield
         rospy.logdebug('%s: %s released', caller, name)
     return ctx
@@ -171,10 +172,10 @@ class Server:
         ## Advertise services
 
         self.Connect = self.nats_mgr.new_service('/server/connect', Connect, self.connect_srv)
-        self.Notify = self.nats_mgr.new_service('/server/notify', Connect, self.notify_srv)
-        self.Resere = self.nats_mgr.new_service('/server/reserve', Connect, self.reserve_srv)
+        self.Notify = self.nats_mgr.new_service('/server/notify', Notify, self.notify_srv)
+        self.Resere = self.nats_mgr.new_service('/server/reserve', Reserve, self.reserve_srv)
         
-        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', NamedBytes)
+        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', NamedBytes, queue_size=5)
         self.State = self.nats_mgr.new_subscriber(f'/server/state', StateMsg, self.state_cb)
 
         ## Node initialized
@@ -231,12 +232,18 @@ class Server:
 
     @property
     def get_sessions(self):
-        return list(self.iter_sessions)
+        with self.sessions_lock('get_sessions'):
+            return list(self.sessions.items())
     
     def sessions_add(self, key, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
         with self.sessions_lock('sessions_add'):
             self.sessions[key] = kwds if dict1 is None else dict1
+
+    def select_session(self, key):
+        with self.sessions_lock('select_session'):
+            if key in self.sessions:
+                yield self.sessions[key]
 
     @property
     def get_reservations(self):
@@ -280,7 +287,7 @@ class Server:
         num_unreserved = 0
         for id_, sess in self.get_sessions:
             if id_ == req.usr_id: continue
-            if not 0 <= arrival_time - sess['arrival_time'] <= timedelta(seconds=self.TIME_HORIZON): continue
+            if not 0 <= (arrival_time - sess['arrival_time']).total_seconds() <= self.TIME_HORIZON: continue
             if not sess['reservation']:
                 num_unreserved += 1
         
@@ -291,9 +298,10 @@ class Server:
             resp.transit_time = time_left - time_needed
             return
 
-        self.sessions[req.usr_id]['arrival_time'] = arrival_time
-        self.sessions[req.usr_id]['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
-        resp.transit_time = self.TRANSIT_TIME
+        for sess in self.select_session(req.usr_id):
+            sess['arrival_time'] = arrival_time
+            sess['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
+            resp.transit_time = self.TRANSIT_TIME
     
     def state_cb(self, state_msg):
         now = datetime.now().replace(microsecond=0)
@@ -346,8 +354,7 @@ class Server:
 
         rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
 
-        with self.reservations_lock:
-            self.reserve(req.name, req, resp)
+        self.reserve(req.name, req, resp)
 
         if not resp.success:
             rospy.loginfo(f"Reservation {resp.id} ({req.name}) recjected: {resp.reason}")
@@ -360,7 +367,7 @@ class Server:
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
         
         dangers = []
-        for _, reservation in self.get_reservations():
+        for _, reservation in self.get_reservations:
             earliest_overlap = max(time_ref, reservation['time_ref'])
             latest_overlap = min(time_ref + td_horizon, reservation['time_ref'] + td_horizon)
             overlap = (latest_overlap - earliest_overlap).total_seconds()
