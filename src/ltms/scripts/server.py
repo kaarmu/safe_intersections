@@ -174,7 +174,7 @@ class Server:
         self.Notify = self.nats_mgr.new_service('/server/notify', Connect, self.notify_srv)
         self.Resere = self.nats_mgr.new_service('/server/reserve', Connect, self.reserve_srv)
         
-        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', String)
+        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', NamedBytes)
         self.State = self.nats_mgr.new_subscriber(f'/server/state', StateMsg, self.state_cb)
 
         ## Node initialized
@@ -268,6 +268,7 @@ class Server:
                           reservation_lock=RLock())
 
         resp.its_id = its_id
+        resp.transit_time = self.TRANSIT_TIME
 
         rospy.logdebug(f'>> session added, {resp.its_id=}')
 

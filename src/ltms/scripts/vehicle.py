@@ -2,6 +2,7 @@
 
 import numpy as np
 import random
+import secrets
 from time import time
 from collections import deque
 from datetime import datetime, timedelta
@@ -14,16 +15,28 @@ from svea_msgs.msg import VehicleState as VehicleStateMsg
 
 # ROS imports
 import rospy
+from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
 import message_filters as mf
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Path
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from nats_ros_connector.nats_manager import NATSManager
+from threading import RLock
+from contextlib import contextmanager
 
 import tf2_ros
 import tf2_geometry_msgs
 from tf import transformations 
+
+def debuggable_lock(name, lock):
+    @contextmanager
+    def ctx(caller):
+        rospy.logdebug('%s: %s acquired', caller, name)
+        with lock:
+            yield
+        rospy.logdebug('%s: %s released', caller, name)
+    return ctx
 
 def state_to_pose(state):
     pose = PoseStamped()
@@ -98,11 +111,16 @@ class Vehicle:
     MIN_STEER_RATE = -np.pi/4
     MAX_STEER_RATE = np.pi/4
     
-    STATE_DIMS = 4 # or 5 if including steering rate
+    STATE_DIMS = 5 # or 5 if including steering rate
+    
     if STATE_DIMS == 4:
-        ACC_GRID, STEER_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER, MAX_STEER))
+        U1_VEC = np.linspace(MIN_STEER, MAX_STEER)
+        U2_VEC = np.linspace(MIN_ACC, MAX_ACC)
     elif STATE_DIMS == 5:
-        ACC_GRID, STEER_RATE_GRID = np.meshgrid(np.linspace(MIN_ACC, MAX_ACC), np.linspace(MIN_STEER_RATE, MAX_STEER_RATE))
+        U1_VEC = np.linspace(MIN_STEER_RATE, MAX_STEER_RATE)
+        U2_VEC = np.linspace(MIN_ACC, MAX_ACC)
+
+    U1_GRID, U2_GRID = np.meshgrid(U1_VEC, U2_VEC)
     
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
@@ -130,73 +148,26 @@ class Vehicle:
         self.INIT_WAIT = load_param('~init_wait', 15)
         self.RES_TIME_LIMIT = load_param('~res_time_limit', 15)
 
-        # rate
+        ## Session management
+
+        self.sessions_lock = debuggable_lock('sessions_lock', RLock())
+        self.sessions = {}
+        self.session_order = []
+
+        self.reserve_q = SimpleQueue()
+
+        def worker():
+            while not rospy.is_shutdown():
+                sess = self.reserve_q.get()
+                self.reserve(sess)
+        Thread(target=worker).start()
+
+        ## Rate
+        
         self.rate = rospy.Rate(10)
-        self.res_rate = rospy.Rate(1)
 
-        # initialize mocap and state
-        self.init_mocap()
-        self.steer = 0.0
-        self.in_zone = False
-        self.reserved_sessions = []
+        ## Initialize mocap
         
-        # init actuator interface
-        self.actuator = ActuationInterface(self.NAME)
-        
-        self.nats_mgr = NATSManager()
-
-        ## Create service proxies
-        self.connect_srv = self.nats_mgr.new_serviceproxy('/connect', Connect)
-
-        ## Node initialized
-        rospy.loginfo(f'{self.__class__.__name__} initialized!')
-        
-    def init_session(self, id):
-        def limits_cb(msg):
-            limits = np.frombuffer(msg.data, dtype=np.float32)
-            self.sessions[id]['limits'] = limits.reshape(self.LIMITS_SHAPE)
-            
-        self.current_sessions.append(id)
-        name = f'{self.NAME}_{id}'
-        arrival_time = self.start_time if id == 0 else self.sessions[id-1]['departure_time']
-        ## Connect to LTMS
-        resp = self.connect_srv(name, arrival_time)
-        if not resp.success:
-            rospy.logerr(f'Failed to connect to LTMS: {resp.message}')
-            return
-        ## Set up session
-        self.sessions[id]['name'] = name
-        self.sessions[id]['arrival_time'] = arrival_time
-        self.sessions[id]['its_id'] = resp.its_id
-        self.sessions[id]['states_pub'] = self.nats_mgr.new_publisher(f'/connz/{name}/states', VehicleStateMsg, queue_size=1)
-        self.sessions[id]['notify_srv'] = self.nats_mgr.new_serviceproxy(f'/connz/{resp.its_id}/notify', Notify)
-        self.sessions[id]['reserve_srv'] = self.nats_mgr.new_serviceproxy(f'/connz/{resp.its_id}/reserve', Reserve)
-        self.sessions[id]['limits_sub'] = self.nats_mgr.new_subscriber(f'/connz/{resp.its_id}/limits', bytes, limits_cb)
-        self.sessions[id]['valid'] = True
-        ## Notify ITS
-        notify_res = self.sessions[id]['notify_srv'](arrival_time)
-        if not notify_res.success:
-            rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
-            return
-        self.sessions[id]['departure_time'] = arrival_time + rospy.Duration(notify_res.transit_time)
-    
-    def control_update(self, limits_mask, steer_rate=False):
-        if not steer_rate:
-            steer_range = (self.steer + self.MIN_STEER_RATE*self.DELTA_TIME, self.steer + self.MAX_STEER_RATE*self.DELTA_TIME)
-            valid_limits = limits_mask & (self.ACC_GRID >= self.MIN_ACC) & (self.ACC_GRID <= self.MAX_ACC) & (self.STEER_GRID >= steer_range[0]) & (self.STEER_GRID <= steer_range[1])
-        else:
-            valid_limits = limits_mask & (self.ACC_GRID >= self.MIN_ACC) & (self.ACC_GRID <= self.MAX_ACC) & (self.STEER_RATE_GRID >= self.MIN_STEER_RATE) & (self.STEER_RATE_GRID <= self.MAX_STEER_RATE)
-        # select a random control from the valid limits
-        i, j = np.random.choice(np.argwhere(valid_limits))
-        vel = self.state.v + self.ACC_GRID[i, j]*self.DELTA_TIME
-        steer = self.steer + self.STEER_RATE_GRID[i, j]*self.DELTA_TIME if steer_rate else self.STEER_GRID[i, j]
-        return vel, steer
-    
-    def choose_exit(self, entry):
-        permitted_exits = [exit for exit in self.EXIT_LOCATIONS if self.PERMITTED_ROUTES.get((entry, exit))]
-        return np.random.choice(permitted_exits)
-
-    def init_mocap(self):
         def state_cb(pose, twist):
             state = VehicleStateMsg()
             state.header = pose.header
@@ -210,117 +181,185 @@ class Vehicle:
             state.yaw = yaw
             state.v = twist.twist.linear.x
             self.state = state
+
+            for sid in list(self.session_order):
+                state.child_frame_id = sid
+                self.State.publish(state)
+                break # Trick to pick first one if there is one
             
         mf.TimeSynchronizer([
             mf.Subscriber(f'/qualisys/{self.NAME}/pose', PoseStamped),
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
         ], 10).registerCallback(state_cb)
+
+        ## Initiatlize interfaces
+
+        self.actuator = ActuationInterface(self.NAME)
+        self.nats_mgr = NATSManager()
+
+        ## Create service proxies
+        self.connect_srv = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
+        self.notify_srv = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
+        self.reserve_srv = self.nats_mgr.new_serviceproxy('/server/reserve', Reserve)
         
-    def is_entering_zone(self, zone=(0, 0), radius=0.25):
-        if np.linalg.norm([self.state.x - zone[0], self.state.y - zone[1]]) < radius and not self.in_zone:
-            self.in_zone = True
-            return True
-        else:
-            return False
+        self.limits = {} # session: limits np.array
+        def limits_cb(msg):
+            for sess in self.select_session(msg.name):
+                rospy.logdebug('Setting new driving limits for %s', msg.name)
+                limits = np.frombuffer(msg.data, dtype=bool)
+                limits = limits.reshape(self.LIMITS_SHAPE)
+                sess.update(limits=limits)
+
+        self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg)
+        self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
+
+        ## Node initialized
+        rospy.loginfo(f'{self.__class__.__name__} initialized!')
     
-    def is_exiting_zone(self, zone=(0, 0), radius=0.5):
-        if np.linalg.norm([self.state.x - zone[0], self.state.y - zone[1]]) > radius and self.in_zone:
-            self.in_zone = False
-            return True
-        else:
-            return False
+    def choose_exit(self, entry):
+        permitted_exits = [exit for exit in self.EXIT_LOCATIONS if (entry, exit) in self.PERMITTED_ROUTES]
+        return np.random.choice(permitted_exits)
+
+    @property
+    def iter_sessions(self):
+        with self.sessions_lock('iter_sessions'):
+            yield from self.sessions.items()
+
+    @property
+    def get_sessions(self):
+        return list(self.iter_sessions)
+
+    def select_session(self, key):
+        with self.sessions_lock('select_session'):
+            if key in self.sessions:
+                yield self.sessions[key]
+
+    def sessions_add(self, key, dict1=None, **kwds):
+        assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
+        with self.sessions_lock('sessions_add'):
+            self.sessions[key] = kwds if dict1 is None else dict1
+
+    def new_session(self, arrival_time, entry_loc, exit_loc):
         
-    def update_sessions(self): 
-        if self.is_entering_zone():
-            self.current_sessions.remove(self.active_session_id)
-            self.reserved_sessions.remove(self.active_session_id)
-            self.active_session_id += 1
-            self.init_session(self.active_session_id + self.NUM_SESSIONS - 1)
-        else:
-            self.is_exiting_zone()
+        ## Create new random session id
+        sid = f'{self.NAME}_{secrets.token_hex(4)}'
+
+        ## Connect to LTMS
+        resp = self.connect_srv(sid, arrival_time.isoformat())
+        transit_time = resp.transit_time
+
+        ## Set up session
+        self.sessions_add(sid,
+                          sid=sid,
+                          entry=entry_loc,
+                          exit=exit_loc,
+                          reserved=False,
+                          limits=None,
+                          arrival_time=arrival_time,
+                          departure_time=arrival_time + timedelta(seconds=transit_time))
+
+        return sid
+
+    def sessions_update(self):
+        with self.sessions_lock('update_sessions'):
+            now = datetime.now()
+            for sid in self.session_order:
+                sess = self.sessions[sid]
+
+                if sess['reserved']:
+                    pass # no need to update
+                
+                elif sess['arrival_time'] <= now + timedelta(seconds=self.RES_TIME_LIMIT):
+                    self.reserve_q.put(sess)
+                
+                else:
+                    # Justify arrival time and notify server
+                    resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
+                    sess['arrival_time'] = adjusted_arrival_time
+                    sess['departure_time'] = adjusted_arrival_time + timedelta(seconds=resp.transit_time)
+
+                # next arrival is depart from this region
+                adjusted_arrival_time = sess['departure_time']
+                entry_loc = sess['exit_loc']
+
+            for sid, sess in self.get_sessions:
+                if sid not in self.session_order and sess['departure_time'] < now:
+                    del self.sessions[sid] # clean up sessions list
+                    continue
+
+            for _ in range(self.NUM_SESSIONS - len(self.sessions)):
+                sid = self.new_session(adjusted_arrival_time, entry_loc, self.choose_exit(entry_loc))
+                sess = self.sessions[sid]
+                adjusted_arrival_time = sess['departure_time']
+                entry_loc = sess['exit_loc']
+                self.session_order.append(sid)
+
+    def reserve(self, sess):
+        resp = self.reserve_srv(name=sess['sid'],
+                                entry=sess['entry_loc'],
+                                exit=sess['exit_loc'],
+                                time_ref=sess['arrival_time'],
+                                earliest_entry=0,
+                                latest_entry=0.5)
     
-    def make_reservations(self):
-        while not rospy.is_shutdown():
-            reserve_time_limit = time() + self.RES_TIME_LIMIT
-            for id in range(self.active_session_id, self.active_session_id + self.NUM_SESSIONS):
-                if reserve_time_limit <= self.sessions[id]['arrival_time']:
-                    if self.reserve_entry_exit(id):
-                        self.reserved_sessions.append(id)
-            self.res_rate.sleep()
-        
-    def reserve_entry_exit(self, id):
-        name = self.sessions[id]['name']
-        earliest_entry = self.start_time if id == 0 else self.sessions[id]['earliest_entry']
-        latest_entry = self.start_time + self.LOOP_TIME if id == 0 else self.sessions[id]['latest_entry']
-        entry = 'init' if id == 0 else self.sessions[id]['entry']
-        exit = self.choose_exit(entry)
-        # Fill session
-        self.sessions[id]['entry'] = entry
-        self.sessions[id]['exit'] = exit
-        self.sessions[id]['earliest_entry'] = res.earliest_entry
-        self.sessions[id]['latest_entry'] = res.latest_entry
-        # Reserve request
-        req = Reserve.Request(name, entry, exit, earliest_entry, 0.0, latest_entry-earliest_entry)
-        res = self.sessions[id]['reserve_srv'](req)
-        if res.success:
-            self.sessions[id]['earliest_exit'] = res.time_ref + res.earliest_exit
-            self.sessions[id]['latest_exit'] = res.time_ref + res.latest_exit
-            self.sessions[id]['departure_time'] = self.sessions[id]['earliest_exit']
-            if id < self.MAX_SESSIONS - 1:
-                self.sessions[id+1]['arrival_time'] = self.sessions[id]['earliest_exit']
-                self.sessions[id+1]['earliest_entry'] = self.sessions[id]['earliest_exit']
-                self.sessions[id+1]['latest_entry'] = self.sessions[id]['latest_exit']
-                self.sessions[id+1]['entry'] = exit
-            return True
-        else:
-            rospy.logerr(f'Failed to reserve entry/exit: {res.message}')           
-            return False
+        assert resp.success, f'Reservation failed: {resp.reason}'
+
+        sess['time_ref'] = resp.time_ref
+        sess['earliest_entry'] = resp.earliest_entry
+        sess['latest_entry'] = resp.latest_entry
+        sess['earliest_exit'] = resp.earliest_exit
+        sess['latest_exit'] = resp.latest_exit
     
+        sess['arrival_time'] = sess['time_ref'] + timedelta(seconds=sess['earliest_entry'])
+        sess['departure_time'] = sess['time_ref'] + timedelta(seconds=sess['earliest_exit'])
+        sess['reserved'] = True
+
     def run(self):
+
         ## Wait for init time
-        self.start_time = time() + self.INIT_WAIT
+        start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
 
         ## Initialize sessions
-        self.current_sessions = list(range(self.NUM_SESSIONS))
-        self.sessions = {}
-        for id in self.current_sessions:
-            self.init_session(id)
-            
-        self.active_session_id = self.current_sessions[0]
-        
-        ## Make reservations in a separate thread
-        Thread(target=self.make_reservations).start()
+        with self.sessions_lock('run (Initialize sessions)'):
+            entry_loc = 'init'
+            sid = self.new_session(start_time, entry_loc, self.choose_exit(entry_loc))
+            self.session_order.append(sid)
+            rospy.Timer(rospy.Duration(1), lambda event: self.sessions_update())
 
-        while True:
-            if time() >= self.start_time:
+        # wait for start time
+        while not rospy.is_shutdown():
+            if datetime.now() >= start_time:
                 break
-            time.sleep(0.1)
-        
-        while not rospy.is_shutdown() and self.active_session_id < self.MAX_SESSIONS:
-            # Apply control
-            if self.sessions[self.active_session_id]['limits']:        
-                vel, steer = self.control_update(self.sessions[self.active_session_id]['limits'], steer_rate=True if self.STATE_DIMS == 5 else False)
-                self.steer = steer
-                # Send control to vehicle
-                print(f'Velocity: {vel}, Steering: {steer}')
-                self.actuator.send_control(steering=steer, velocity=vel)
-        
-            # State updates
-            for id in self.reserved_sessions:
-                self.sessions[id]['states_pub'].publish(self.state)
-                
-            # Send notifications
-            for id in self.current_sessions:
-                if id not in self.reserved_sessions:
-                    self.sessions[id]['arrival_time'] = self.sessions[id-1]['departure_time']
-                    notify_res = self.sessions[id]['notify_srv'](self.sessions[id]['arrival_time'])
-                    if not notify_res.success:
-                        rospy.logerr(f'Failed to notify ITS: {notify_res.message}')
-                        return
-                    self.sessions[id]['departure_time'] = self.sessions[id]['arrival_time'] + notify_res.transit_time
-                    
-            # Update sessions
-            self.update_sessions()
+            rospy.sleep(0.1)
+
+        active_session_id = sid
+        steering, velocity = 0, 0
+
+        while not rospy.is_shutdown():
+
+            with self.sessions_lock('run (Main Loop)'):
+                if self.sessions[active_session_id]['departure_time'] <= datetime.now():
+                    self.session_order = self.session_order[1:]
+                    active_session_id = self.session_order[0]
+
+            limits_mask = self.limits.get(active_session_id, None)
+            if limits_mask is None:
+                rospy.logwarn('Missing driving limits')
+            else:
+                # Update control
+                if self.STATE_DIMS == 4:
+                    limits_mask &= (self.U1_GRID >= steering + self.MIN_STEER_RATE)
+                    limits_mask &= (self.U1_GRID <= steering + self.MAX_STEER_RATE)
+                    i, j = np.random.choice(np.argwhere(limits_mask))
+                    steering = self.U1_VEC[i]
+                    velocity += self.U2_VEC[j] * self.DELTA_TIME
+                if self.STATE_DIMS == 5:
+                    i, j = np.random.choice(np.argwhere(limits_mask))
+                    steering += self.U1_VEC[i] * self.DELTA_TIME
+                    velocity += self.U2_VEC[j] * self.DELTA_TIME
+
+            rospy.loginfo(f'Steering: {steering}, Velocity: {velocity}')
+            self.actuator.send_control(steering=steering, velocity=velocity)
 
             # Sleep
             self.rate.sleep()

@@ -45,7 +45,7 @@ async def main():
     subscribers = load_param("~subscribers", [])
     services = load_param("~services", [])
     services_proxies = load_param("~service_proxies", [])
-    srv_req_timeout = load_param("~srv_req_timeout", 1)
+    srv_req_timeout = load_param("~srv_req_timeout", None)
     # Create event loop
     event_loop = asyncio.get_event_loop()
     # NATS Client

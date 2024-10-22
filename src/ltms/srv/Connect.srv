@@ -2,3 +2,4 @@ string usr_id
 string arrival_time
 ---
 string its_id
+int32 transit_time
