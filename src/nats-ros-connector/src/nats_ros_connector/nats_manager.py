@@ -17,9 +17,11 @@ class NATSManager:
         rospy.logdebug('NATSManager initialized')
 
     def _caller(self, reqd):
+        rospy.logdebug(f'NATSManager: Calling with {reqd}')
         req = ReqRep._request_class(json.dumps(reqd)) 
         rep = self._nats_client_caller(req)
         repd = json.loads(rep.data)
+        rospy.logdebug(f'NATSManager: Response {repd}')
         return repd
 
     ## Subscribers ##

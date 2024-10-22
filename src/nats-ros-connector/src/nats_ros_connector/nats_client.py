@@ -3,6 +3,7 @@ import nats
 import rospy
 import json
 from typing import Optional
+from threading import Event
 from functools import partial
 from dataclasses import dataclass
 from nats_ros_connector.srv import ReqRep
@@ -87,6 +88,8 @@ class NATSClient:
         event_loop,
         **kwds,
     ):
+        self.active_event = Event()
+
         self.host = nats_host
         self.publishers = publishers
         self.subscribers = subscribers
@@ -154,6 +157,7 @@ class NATSClient:
                                         service_dict['type'],
                                         sync=False)
 
+        self.active_event.set()
         rospy.logdebug('NATS Connector: Setup complete')
 
     async def close(self):
@@ -212,50 +216,59 @@ class NATSClient:
 
     def new_subscriber(self, name, *, sync=True):
         if name not in self._subscribers:
+            self.active_event.wait()
             obj = NATSSubscriber(self.nc, name)
             self._subscribers[name] = obj
             return self._run(obj.start(), sync)
 
     def del_subscriber(self, name, *, sync=True):
         if name in self._subscribers:
+            self.active_event.wait()
             obj: NATSSubscriber = self._subscribers.pop(name)
-            self._run(obj.stop(), sync)
+            return self._run(obj.stop(), sync)
 
     ## Publishers ##
 
     def new_publisher(self, name, *, sync=True):
         if name not in self._publishers:
+            self.active_event.wait()
             obj = NATSPublisher(self.nc, name, self.event_loop)
             self._publishers[name] = obj
             return self._run(obj.start(), sync)
 
     def del_publisher(self, name, *, sync=True):
         if name in self._publishers:
+            self.active_event.wait()
             obj: NATSPublisher = self._publishers.pop(name)
-            self._run(obj.stop(), sync)
+            return self._run(obj.stop(), sync)
 
     ## Services ##
 
     def new_service(self, name, *, sync=True):
         if name not in self._services:
+            self.active_event.wait()
             obj = NATSService(self.nc, name)
             self._services[name] = obj
-            self._run(obj.start(), sync=True)
+            return self._run(obj.start(), sync)
 
     def del_service(self, name, *, sync=True):
         if name in self._services:
+            self.active_event.wait()
             obj: NATSService = self._services.pop(name)
-            self._run(obj.stop(), sync)
+            return self._run(obj.stop(), sync)
 
     ## Service Proxy ##
 
     def new_serviceproxy(self, name, type, *, sync=True):
         if name not in self._service_proxies:
+            self.active_event.wait()
             obj = NATSServiceProxy(self.nc, name, type, self.event_loop, self.params.srv_req_timeout)
             self._service_proxies[name] = obj
-            self._run(obj.start(), sync)
+            return self._run(obj.start(), sync)
     
     def del_serviceproxy(self, name, *, sync=True):
         if name in self._service_proxies:
+            self.active_event.wait()
             obj: NATSServiceProxy = self._service_proxies.pop(name)
-            self._run(obj.stop(), sync)
+            return self._run(obj.stop(), sync)
+

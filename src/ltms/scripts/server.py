@@ -11,6 +11,7 @@ from pathlib import Path
 from functools import wraps
 
 import rospy
+from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
 from svea_msgs.msg import VehicleState as StateMsg
 
@@ -19,7 +20,18 @@ import hj_reachability.shapes as shp
 from ltms_util import Solver, create_chaos
 from nats_ros_connector.nats_manager import NATSManager
 
+from contextlib import contextmanager
+
 from std_msgs.msg import String
+
+def debuggable_lock(name, lock):
+    @contextmanager
+    def ctx(caller):
+        rospy.logdebug('%s: %s acquired', caller, name)
+        with lock:
+            yield
+        rospy.logdebug('%s: %s released', caller, name)
+    return ctx
 
 def load_param(name, value=None):
     """Function used to get parameters from ROS parameter server
@@ -103,7 +115,7 @@ class Server:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
 
         ## Load parameters
 
@@ -145,20 +157,25 @@ class Server:
         self.environment = self.load_environment()
         self.offline_passes = self.load_offline_analyses()
 
-        self.sessions_lock = RLock()
+        self.sessions_lock = debuggable_lock('sessions_lock', RLock())
         self.sessions = {}
 
         def clean_sessions_tmr(event):
             now = datetime.now().replace(microsecond=0)
-            with self.sessions_lock:
+            with self.sessions_lock('clean_sessions_tmr'):
                 for id_, sess in self.get_sessions:
                     if sess['session_timeout'] < now:
                         sess = self.sessions.pop(id_)
-        rospy.Timer(rospy.Duration(1), clean_sessions_tmr)
+        rospy.Timer(rospy.Duration(2), clean_sessions_tmr)
 
         ## Advertise services
 
-        self.nats_mgr.new_service('/connect', Connect, self.connect_srv)
+        self.Connect = self.nats_mgr.new_service('/server/connect', Connect, self.connect_srv)
+        self.Notify = self.nats_mgr.new_service('/server/notify', Connect, self.notify_srv)
+        self.Resere = self.nats_mgr.new_service('/server/reserve', Connect, self.reserve_srv)
+        
+        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', String)
+        self.State = self.nats_mgr.new_subscriber(f'/server/state', StateMsg, self.state_cb)
 
         ## Node initialized
 
@@ -209,7 +226,7 @@ class Server:
     
     @property
     def iter_sessions(self):
-        with self.sessions_lock:
+        with self.sessions_lock('iter_sessions'):
             yield from self.sessions.items()
 
     @property
@@ -218,7 +235,7 @@ class Server:
     
     def sessions_add(self, key, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
-        with self.sessions_lock:
+        with self.sessions_lock('sessions_add'):
             self.sessions[key] = kwds if dict1 is None else dict1
 
     @property
@@ -227,7 +244,7 @@ class Server:
     
     def add_resevation(self, key, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
-        with self.sessions_lock:
+        with self.sessions_lock('add_reservation'):
             with self.sessions[key]['reservation_lock']:
                 self.sessions[key]['reservation'] = kwds if dict1 is None else dict1
     
@@ -237,108 +254,14 @@ class Server:
         usr_id = req.usr_id
         its_id = f'its_{secrets.token_hex(4)}'
 
-        @service_wrp(Notify)
-        def notify_srv(req, resp):
-            now = datetime.now().replace(microsecond=0)
-            arrival_time = datetime.fromisoformat(req.arrival_time)
-
-            num_unreserved = 0
-            for id_, sess in self.get_sessions:
-                if id_ == usr_id: continue
-                if not 0 <= arrival_time - sess['arrival_time'] <= self.TIME_HORIZON: continue
-                if not sess['reservation']:
-                    num_unreserved += 1
-            
-            time_left = (arrival_time - now).total_seconds()
-            time_needed = self.COMPUTE_TIME * (num_unreserved+1)
-            if time_left <= time_needed:
-                # will be negative; the time we're late with. minus sign indicates an error. 
-                resp.transit_time = time_left - time_needed
-                return
-
-            self.sessions[usr_id]['arrival_time'] = arrival_time
-            self.sessions[usr_id]['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
-            resp.transit_time = self.TRANSIT_TIME
-        
-        def state_cb(state_msg):
-            now = datetime.now().replace(microsecond=0)
-
-            x = state_msg.x
-            y = state_msg.y
-            h = state_msg.yaw
-            v = state_msg.velocity
-
-            time_ref = self.sessions[usr_id]['reservation']['time_ref']
-            pass4 = self.sessions[usr_id]['reservation']['analysis']['pass4']
-            state = np.array([x, y, h, 0, v])
-            i = (now - time_ref).total_seconds() // self.TIME_STEP
-
-            if not 0 <= i < len(self.solver.timeline):
-                return # outside timeline
-            
-            idx = (np.array([x, y, h]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
-            idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
-            idx = np.round(idx).astype(int)
-
-            if (idx < 0).any() or (self.grid.shape[:3] <= idx).any():
-                return # outside grid
-
-            mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
-
-            limits_msg = String(mask.tobytes())
-            self.sessions[usr_id]['DrivingLimits'].publish(limits_msg)
-
-        @service_wrp(Reserve)
-        def reserve_srv(req, resp):
-            resp.success = False
-            resp.reason = 'Unknown.'
-
-            if req.entry not in self.ENTRY_LOCATIONS:
-                resp.reason = f"Illegal entry region: '{req.entry}'."
-                return
-            if req.exit not in self.EXIT_LOCATIONS:
-                resp.reason = f"Illegal exit region: '{req.exit}'."
-                return
-            if (req.entry, req.exit) not in self.PERMITTED_ROUTES:
-                resp.reason = f"Illegal route through region: '{req.entry}' -> '{req.exit}'."
-                return
-            
-            try:
-                time_ref = datetime.fromisoformat(req.time_ref)
-            except Exception:
-                resp.reason = f"Malformed ISO time: '{req.time_ref}'."
-                return
-            
-            notify_resp = notify_srv(arrival_time=req.time_ref)
-            if notify_resp.transit_time < 0: # catch notify error
-                resp.reason = f'Reservation late: {-notify_resp.transit_time} s too late'
-                return
-
-            rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
-
-            with self.reservations_lock:
-                self.reserve(usr_id, req, resp)
-
-            if not resp.success:
-                rospy.loginfo(f"Reservation {resp.id} ({req.name}) recjected: {resp.reason}")
-                return
-
-            rospy.loginfo(f"Reservation {resp.id} ({req.name}) approved.")
-            
-            with self.sessions_lock:
-                self.sessions[usr_id]['DrivingLimits'] = \
-                    self.nats_mgr.new_publisher(f'/connz/{its_id}/limits', String)
-                
-                self.sessions[usr_id]['UserState'] = \
-                    self.nats_mgr.new_subscriber(f'/connz/{usr_id}/state', StateMsg, state_cb)
+        rospy.logdebug(f'> {req.usr_id} will get here at {req.arrival_time}')
 
         arrival_time = datetime.fromisoformat(req.arrival_time)
         session_timeout = arrival_time + self.SESSION_TIMEOUT
 
+        rospy.logdebug(f'>> timeout at {session_timeout}')
+
         self.sessions_add(usr_id,
-                          Notify=self.nats_mgr.new_service(f'/connz/{its_id}/notify', Notify, notify_srv),
-                          Reserve=self.nats_mgr.new_service(f'/connz/{its_id}/reserve', Reserve, reserve_srv),
-                          self=its_id, user=usr_id,
                           arrival_time=arrival_time,
                           session_timeout=session_timeout,
                           reservation={},
@@ -346,6 +269,91 @@ class Server:
 
         resp.its_id = its_id
 
+        rospy.logdebug(f'>> session added, {resp.its_id=}')
+
+    @service_wrp(Notify, method=True)
+    def notify_srv(self, req, resp):
+        now = datetime.now().replace(microsecond=0)
+        arrival_time = datetime.fromisoformat(req.arrival_time)
+
+        num_unreserved = 0
+        for id_, sess in self.get_sessions:
+            if id_ == req.usr_id: continue
+            if not 0 <= arrival_time - sess['arrival_time'] <= timedelta(seconds=self.TIME_HORIZON): continue
+            if not sess['reservation']:
+                num_unreserved += 1
+        
+        time_left = (arrival_time - now).total_seconds()
+        time_needed = self.COMPUTE_TIME * (num_unreserved+1)
+        if time_left <= time_needed:
+            # will be negative; the time we're late with. minus sign indicates an error. 
+            resp.transit_time = time_left - time_needed
+            return
+
+        self.sessions[req.usr_id]['arrival_time'] = arrival_time
+        self.sessions[req.usr_id]['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
+        resp.transit_time = self.TRANSIT_TIME
+    
+    def state_cb(self, state_msg):
+        now = datetime.now().replace(microsecond=0)
+
+        usr_id = state_msg.child_frame_id
+        x = state_msg.x
+        y = state_msg.y
+        h = state_msg.yaw
+        v = state_msg.velocity
+
+        time_ref = self.sessions[usr_id]['reservation']['time_ref']
+        pass4 = self.sessions[usr_id]['reservation']['analysis']['pass4']
+        state = np.array([x, y, h, 0, v])
+        i = (now - time_ref).total_seconds() // self.TIME_STEP
+
+        if not 0 <= i < len(self.solver.timeline):
+            return # outside timeline
+        
+        idx = (np.array([x, y, h]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
+        idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
+        idx = np.round(idx).astype(int)
+
+        if (idx < 0).any() or (self.grid.shape[:3] <= idx).any():
+            return # outside grid
+
+        mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
+
+        limits_msg = NamedBytes(usr_id, mask.tobytes())
+        self.Limits.publish(limits_msg)
+
+    @service_wrp(Reserve, method=True)
+    def reserve_srv(self, req, resp):
+        resp.success = False
+        resp.reason = 'Unknown.'
+
+        if req.entry not in self.ENTRY_LOCATIONS:
+            resp.reason = f"Illegal entry region: '{req.entry}'."
+            return
+        if req.exit not in self.EXIT_LOCATIONS:
+            resp.reason = f"Illegal exit region: '{req.exit}'."
+            return
+        if (req.entry, req.exit) not in self.PERMITTED_ROUTES:
+            resp.reason = f"Illegal route through region: '{req.entry}' -> '{req.exit}'."
+            return
+        
+        notify_resp = self.notify_srv(arrival_time=req.time_ref)
+        if notify_resp.transit_time < 0: # catch notify error
+            resp.reason = f'Reservation late: {-notify_resp.transit_time} s too late'
+            return
+
+        rospy.loginfo(f"Reservation request from '{req.name}': {req.entry} -> {req.exit}")
+
+        with self.reservations_lock:
+            self.reserve(req.name, req, resp)
+
+        if not resp.success:
+            rospy.loginfo(f"Reservation {resp.id} ({req.name}) recjected: {resp.reason}")
+            return
+
+        rospy.loginfo(f"Reservation {resp.id} ({req.name}) approved.")
+        
     def resolve_dangers(self, time_ref):
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
@@ -384,6 +392,13 @@ class Server:
         return dangers
 
     def reserve(self, usr_id, req, resp):
+
+        try:
+            time_ref = datetime.fromisoformat(req.time_ref)
+        except Exception:
+            resp.reason = f"Malformed ISO time: '{req.time_ref}'."
+            return
+        
         try:
             earliest_entry = round(max(req.earliest_entry, 0), 1)
             latest_entry = round(min(req.latest_entry, self.TIME_HORIZON), 1)

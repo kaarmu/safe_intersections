@@ -1,0 +1,2 @@
+string name
+byte[] mask
