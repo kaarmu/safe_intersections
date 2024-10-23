@@ -166,7 +166,9 @@ def create_chaos(grid, *envs):
                                     target_min=[X0, Y0],
                                     target_max=[X0 + 0.075*XN, Y0 + 0.15*YN])
     if 'full' in envs_sch:
-        out['full'] = shp.complement(out['init'])
+        out['full'] = shp.rectangle(grid, axes=[V],
+                                    target_min=[0.3],
+                                    target_max=[0.6])
 
     if 'left' in envs_sch:
         out['left'] =   shp.rectangle(grid, axes=[X, Y, H],

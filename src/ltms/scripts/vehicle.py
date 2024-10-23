@@ -204,7 +204,7 @@ class Vehicle:
 
         ## Initiatlize interfaces
 
-        self.actuator = ActuationInterface(self.NAME).start(wait=True)
+        self.actuator = ActuationInterface(self.NAME).start()
         self.nats_mgr = NATSManager()
 
         ## Create service proxies
