@@ -32,8 +32,9 @@ from tf import transformations
 def debuggable_lock(name, lock):
     @contextmanager
     def ctx(caller):
-        rospy.logdebug('%s: %s acquired', caller, name)
+        rospy.logdebug('%s: %s acquiring', caller, name)
         with lock:
+            rospy.logdebug('%s: %s acquired', caller, name)
             yield
         rospy.logdebug('%s: %s released', caller, name)
     return ctx
@@ -139,7 +140,7 @@ class Vehicle:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
 
         ## Load parameters
 
@@ -194,7 +195,7 @@ class Vehicle:
 
         ## Initiatlize interfaces
 
-        self.actuator = ActuationInterface(self.NAME)
+        self.actuator = ActuationInterface(self.NAME).start(wait=True)
         self.nats_mgr = NATSManager()
 
         ## Create service proxies
@@ -210,7 +211,7 @@ class Vehicle:
                 limits = limits.reshape(self.LIMITS_SHAPE)
                 sess.update(limits=limits)
 
-        self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg)
+        self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
 
         ## Node initialized
@@ -251,8 +252,8 @@ class Vehicle:
         ## Set up session
         self.sessions_add(sid,
                           sid=sid,
-                          entry=entry_loc,
-                          exit=exit_loc,
+                          entry_loc=entry_loc,
+                          exit_loc=exit_loc,
                           reserved=False,
                           limits=None,
                           arrival_time=arrival_time,
@@ -261,7 +262,7 @@ class Vehicle:
         return sid
 
     def sessions_update(self):
-        with self.sessions_lock('update_sessions'):
+        with self.sessions_lock('sessions_update'):
             now = datetime.now()
             for sid in self.session_order:
                 sess = self.sessions[sid]
@@ -294,15 +295,24 @@ class Vehicle:
                 entry_loc = sess['exit_loc']
                 self.session_order.append(sid)
 
+            rospy.loginfo(f'Reserve Queue Length: {self.reserve_q.qsize()}')
+
     def reserve(self, sess):
+        rospy.logdebug('Reserving for %s', sess['sid'])
+
+        if sess['reserved']: 
+            rospy.logdebug('> Already reserved!', sess['sid'])
+            return
+
         resp = self.reserve_srv(name=sess['sid'],
                                 entry=sess['entry_loc'],
                                 exit=sess['exit_loc'],
-                                time_ref=sess['arrival_time'],
+                                time_ref=sess['arrival_time'].isoformat(),
                                 earliest_entry=0,
                                 latest_entry=0.5)
     
         assert resp.success, f'Reservation failed: {resp.reason}'
+        rospy.logdebug(f'> Reservation succeeded!')
 
         sess['time_ref'] = resp.time_ref
         sess['earliest_entry'] = resp.earliest_entry
@@ -314,6 +324,8 @@ class Vehicle:
         sess['departure_time'] = sess['time_ref'] + timedelta(seconds=sess['earliest_exit'])
         sess['reserved'] = True
 
+        rospy.logdebug(f'> Reservation complete for %s', sess['sid'])
+
     def run(self):
 
         ## Wait for init time
@@ -324,9 +336,9 @@ class Vehicle:
             entry_loc = 'init'
             sid = self.new_session(start_time, entry_loc, self.choose_exit(entry_loc))
             self.session_order.append(sid)
-            rospy.Timer(rospy.Duration(1), lambda event: self.sessions_update())
+        rospy.Timer(rospy.Duration(1), lambda event: self.sessions_update())
 
-        # wait for start time
+        ## Wait for start time
         while not rospy.is_shutdown():
             if datetime.now() >= start_time:
                 break
