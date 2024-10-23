@@ -16,12 +16,15 @@ def create_chaos(grid, *envs):
     XN = grid.domain.hi[X] - grid.domain.lo[X]
     YN = grid.domain.hi[Y] - grid.domain.lo[Y]
 
+    sides = ('left', 'top', 'right', 'bottom')
+
     centers = ('center_e', 'center_ene', 'center_ne', 'center_nne',
                'center_n', 'center_nnw', 'center_nw', 'center_wnw',
                'center_w', 'center_wsw', 'center_sw', 'center_ssw',
                'center_s', 'center_ese', 'center_se', 'center_sse')
 
     if not envs:
+        envs += sides
         envs += centers
         envs += ('init', 'full')
 
@@ -36,14 +39,14 @@ def create_chaos(grid, *envs):
     (H_W, H_WSW, H_SW, H_SSW,
      H_S, H_ESE, H_SE, H_SSE,
      H_E, H_ENE, H_NE, H_NNE,
-     H_N, H_NNW, H_NW, H_WNW) = [-pi + (2*pi/16)*x for x in range(16)]
+     H_N, H_NNW, H_NW, H_WNW) = [x*pi/16 - pi/2 for x in range(16)]
 
-    H_MARGIN = 2*pi/16 * 0.8
+    H_MARGIN = 2*pi/16
 
     if 'center' in envs_sch:
         out['center'] = shp.rectangle(grid, axes=[X, Y],
-                                      target_min=[X0 + (0.5-0.1)*XN, Y0 + (0.5-0.1)*YN],
-                                      target_max=[X0 + (0.5+0.1)*XN, Y0 + (0.5+0.1)*YN])
+                                      target_min=[X0 + (0.5-0.05)*XN, Y0 + (0.5-0.05)*YN],
+                                      target_max=[X0 + (0.5+0.05)*XN, Y0 + (0.5+0.05)*YN])
 
     if 'center_w' in envs_sch:
         out['center_w'] = shp.intersection(
@@ -159,13 +162,31 @@ def create_chaos(grid, *envs):
         )
 
     if 'init' in envs_sch:
-        out['init'] = shp.rectangle(grid, axes=[X, Y, H],
-                                    target_min=[X0,            Y0,              H_N - H_MARGIN],
-                                    target_max=[X0 + 0.15*XN, Y0 + 0.23*YN,     H_N + H_MARGIN])
+        out['init'] = shp.rectangle(grid, axes=[X, Y],
+                                    target_min=[X0, Y0],
+                                    target_max=[X0 + 0.075*XN, Y0 + 0.15*YN])
     if 'full' in envs_sch:
-        out['full'] = shp.rectangle(grid, axes=[V],
-                                    target_min=[0.3],
-                                    target_max=[0.6])
+        out['full'] = shp.complement(out['init'])
+
+    if 'left' in envs_sch:
+        out['left'] =   shp.rectangle(grid, axes=[X, Y, H],
+                                      target_min=[X0 + (0.1-0.05)*XN, Y0 + (0.5-0.05)*YN, H_N - H_MARGIN],
+                                      target_max=[X0 + (0.1+0.05)*XN, Y0 + (0.5+0.05)*YN, H_N + H_MARGIN])
+
+    if 'top' in envs_sch:
+        out['top'] =    shp.rectangle(grid, axes=[X, Y, H],
+                                      target_min=[X0 + (0.5-0.05)*XN, Y0 + (0.9-0.05)*YN, H_E - H_MARGIN],
+                                      target_max=[X0 + (0.5+0.05)*XN, Y0 + (0.9+0.05)*YN, H_E + H_MARGIN])
+
+    if 'right' in envs_sch:
+        out['right'] =  shp.rectangle(grid, axes=[X, Y, H],
+                                      target_min=[X0 + (0.9-0.05)*XN, Y0 + (0.5-0.05)*YN, H_S - H_MARGIN],
+                                      target_max=[X0 + (0.9+0.05)*XN, Y0 + (0.5+0.05)*YN, H_S + H_MARGIN])
+
+    if 'bottom' in envs_sch:
+        out['bottom'] = shp.rectangle(grid, axes=[X, Y, H],
+                                      target_min=[X0 + (0.5-0.05)*XN, Y0 + (0.1-0.05)*YN, H_W - H_MARGIN],
+                                      target_max=[X0 + (0.5+0.05)*XN, Y0 + (0.1+0.05)*YN, H_W + H_MARGIN])
 
     return {name: out[name] for name in envs_out}
 

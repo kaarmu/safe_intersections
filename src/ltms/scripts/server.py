@@ -80,28 +80,11 @@ def around(l, e, n):
     N = len(l)
     return [l[(i+j) % N] for j in range(-n, n+1)]
 
-_LOCATIONS = [
-    'center_e', 
-    # 'center_ene', 
-    'center_ne', 
-    # 'center_nne',
-    'center_n', 
-    # 'center_nnw', 
-    'center_nw', 
-    # 'center_wnw',
-    'center_w', 
-    # 'center_wsw', 
-    'center_sw', 
-    # 'center_ssw',
-    'center_s', 
-    # 'center_ese', 
-    'center_se', 
-    # 'center_sse',
-]
+_LOCATIONS = ['left', 'top', 'right', 'bottom']
 _PERMITTED_ROUTES = {
     (_entry, _exit): ('full',)
     for _entry in _LOCATIONS
-    for _exit in set(around(_LOCATIONS, _entry, 1)) - {_entry}
+    for _exit in set(_LOCATIONS) - {_entry}
 }
 
 class Server:
@@ -121,7 +104,7 @@ class Server:
     LOCATIONS = _LOCATIONS + ['full', 'init']
     PERMITTED_ROUTES = _PERMITTED_ROUTES | {
         ('init', _exit): ('full',)
-        for _exit in 'center_e'.split()
+        for _exit in 'left'.split()
     }
 
     def __init__(self):

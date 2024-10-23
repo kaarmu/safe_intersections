@@ -83,28 +83,11 @@ def load_param(name, value=None):
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, value)
 
-_LOCATIONS = [
-    'center_e', 
-    # 'center_ene', 
-    'center_ne', 
-    # 'center_nne',
-    'center_n', 
-    # 'center_nnw', 
-    'center_nw', 
-    # 'center_wnw',
-    'center_w', 
-    # 'center_wsw', 
-    'center_sw', 
-    # 'center_ssw',
-    'center_s', 
-    # 'center_ese', 
-    'center_se', 
-    # 'center_sse',
-]
+_LOCATIONS = ['left', 'top', 'right', 'bottom']
 _PERMITTED_ROUTES = {
-    (_entry, _exit): ('outside',)
+    (_entry, _exit): ('full',)
     for _entry in _LOCATIONS
-    for _exit in set(around(_LOCATIONS, _entry, 1)) - {_entry}
+    for _exit in set(_LOCATIONS) - {_entry}
 }
 
 class Vehicle:
@@ -137,10 +120,10 @@ class Vehicle:
     
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
-    LOCATIONS = _LOCATIONS + ['outside']
+    LOCATIONS = _LOCATIONS + ['full']
     PERMITTED_ROUTES = dict(list(_PERMITTED_ROUTES.items()) + [
-        (('init', _exit), ('outside',))
-        for _exit in 'center_e'.split()
+        (('init', _exit), ('full',))
+        for _exit in 'left'.split()
     ])
 
     
