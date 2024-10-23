@@ -84,15 +84,27 @@ def load_param(name, value=None):
     return rospy.get_param(name, value)
 
 _LOCATIONS = [
-    'center_e', 'center_ene', 'center_ne', 'center_nne',
-    'center_n', 'center_nnw', 'center_nw', 'center_wnw',
-    'center_w', 'center_wsw', 'center_sw', 'center_ssw',
-    'center_s', 'center_ese', 'center_se', 'center_sse',
+    'center_e', 
+    # 'center_ene', 
+    'center_ne', 
+    # 'center_nne',
+    'center_n', 
+    # 'center_nnw', 
+    'center_nw', 
+    # 'center_wnw',
+    'center_w', 
+    # 'center_wsw', 
+    'center_sw', 
+    # 'center_ssw',
+    'center_s', 
+    # 'center_ese', 
+    'center_se', 
+    # 'center_sse',
 ]
 _PERMITTED_ROUTES = {
     (_entry, _exit): ('outside',)
     for _entry in _LOCATIONS
-    for _exit in set(_LOCATIONS) - set(around(_LOCATIONS, _entry, 4)) # flip
+    for _exit in set(around(_LOCATIONS, _entry, 1)) - {_entry}
 }
 
 class Vehicle:
@@ -128,7 +140,7 @@ class Vehicle:
     LOCATIONS = _LOCATIONS + ['outside']
     PERMITTED_ROUTES = dict(list(_PERMITTED_ROUTES.items()) + [
         (('init', _exit), ('outside',))
-        for _exit in 'center_ne center_ene center_e'.split()
+        for _exit in 'center_e'.split()
     ])
 
     
@@ -146,8 +158,13 @@ class Vehicle:
 
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
+
         self.INIT_WAIT = load_param('~init_wait', 15)
+        self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
+
         self.RES_TIME_LIMIT = load_param('~res_time_limit', 15)
+        self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
+
 
         ## Session management
 
@@ -160,7 +177,16 @@ class Vehicle:
         def worker():
             while not rospy.is_shutdown():
                 sess = self.reserve_q.get()
-                self.reserve(sess)
+                with sess['lock']('reserve worker'):
+                    success = self.reserve(sess)
+                    if not success:
+                        # Justify arrival time and notify server
+                        arrival_time = sess['arrival_time'] + timedelta(seconds=1)
+                        resp = self.notify_srv(sess['sid'], arrival_time.isoformat())
+                        sess['arrival_time'] = arrival_time
+                        sess['departure_time'] = arrival_time + timedelta(seconds=resp.transit_time)
+
+
         Thread(target=worker).start()
 
         ## Rate
@@ -203,7 +229,6 @@ class Vehicle:
         self.notify_srv = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
         self.reserve_srv = self.nats_mgr.new_serviceproxy('/server/reserve', Reserve)
         
-        self.limits = {} # session: limits np.array
         def limits_cb(msg):
             for sess in self.select_session(msg.name):
                 rospy.logdebug('Setting new driving limits for %s', msg.name)
@@ -222,23 +247,29 @@ class Vehicle:
         return np.random.choice(permitted_exits)
 
     @property
-    def iter_sessions(self):
-        with self.sessions_lock('iter_sessions'):
-            yield from self.sessions.items()
+    def get_sessions(self):
+        return list(self.sessions.items())
 
     @property
-    def get_sessions(self):
-        return list(self.iter_sessions)
-
-    def select_session(self, key):
-        with self.sessions_lock('select_session'):
-            if key in self.sessions:
-                yield self.sessions[key]
+    def iter_sessions(self):
+        with self.sessions_lock('iter_sessions'):
+            for sid, sess in self.sessions.items():
+                with sess['lock']('iter_sessions'):
+                    yield (sid, sess)
 
     def sessions_add(self, key, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
         with self.sessions_lock('sessions_add'):
             self.sessions[key] = kwds if dict1 is None else dict1
+
+    def get_session(self, sid):
+        return self.sessions.get(sid, None)
+
+    def select_session(self, sid):
+        with self.sessions_lock('select_session'):
+            if sid not in self.sessions: return
+            with self.sessions[sid]['lock']('select_session'):
+                yield self.sessions[sid]
 
     def new_session(self, arrival_time, entry_loc, exit_loc):
         
@@ -252,6 +283,7 @@ class Vehicle:
         ## Set up session
         self.sessions_add(sid,
                           sid=sid,
+                          lock=debuggable_lock(f'{sid}_lock', RLock()),
                           entry_loc=entry_loc,
                           exit_loc=exit_loc,
                           reserved=False,
@@ -264,57 +296,66 @@ class Vehicle:
     def sessions_update(self):
         with self.sessions_lock('sessions_update'):
             now = datetime.now()
+
+            skip = False
             for sid in self.session_order:
                 sess = self.sessions[sid]
+                with sess['lock']('sessions_update'):
+                    if sess['reserved'] or not self.reserve_q.empty():
+                        pass # no need to update / don't spam queue
+                    
+                    elif not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
+                        self.reserve_q.put(sess)
+                        skip = True # just put the first non-reserved on queue
 
-                if sess['reserved']:
-                    pass # no need to update
-                
-                elif sess['arrival_time'] <= now + timedelta(seconds=self.RES_TIME_LIMIT):
-                    self.reserve_q.put(sess)
-                
-                else:
-                    # Justify arrival time and notify server
-                    resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
-                    sess['arrival_time'] = adjusted_arrival_time
-                    sess['departure_time'] = adjusted_arrival_time + timedelta(seconds=resp.transit_time)
+                    else:
+                        # Justify arrival time and notify server
+                        resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
+                        sess['arrival_time'] = adjusted_arrival_time
+                        sess['departure_time'] = adjusted_arrival_time + timedelta(seconds=resp.transit_time)
 
-                # next arrival is depart from this region
-                adjusted_arrival_time = sess['departure_time']
-                entry_loc = sess['exit_loc']
+                    # next arrival is depart from this region
+                    adjusted_arrival_time = sess['departure_time']
+                    entry_loc = sess['exit_loc']
 
-            for sid, sess in self.get_sessions:
-                if sid not in self.session_order and sess['departure_time'] < now:
-                    del self.sessions[sid] # clean up sessions list
-                    continue
+            cleanup = [sid
+                       for sid, sess in self.iter_sessions
+                       if sid not in self.session_order and sess['departure_time'] < now]
+            for sid in cleanup:
+                del self.sessions[sid] # clean up sessions list
 
             for _ in range(self.NUM_SESSIONS - len(self.sessions)):
                 sid = self.new_session(adjusted_arrival_time, entry_loc, self.choose_exit(entry_loc))
                 sess = self.sessions[sid]
-                adjusted_arrival_time = sess['departure_time']
-                entry_loc = sess['exit_loc']
-                self.session_order.append(sid)
+                with sess['lock']('sessions_update'):
+                    adjusted_arrival_time = sess['departure_time']
+                    entry_loc = sess['exit_loc']
+                    self.session_order.append(sid)
 
             rospy.loginfo(f'Reserve Queue Length: {self.reserve_q.qsize()}')
 
     def reserve(self, sess):
+        # Assumes sess is already locked by caller
         rospy.logdebug('Reserving for %s', sess['sid'])
 
         if sess['reserved']: 
             rospy.logdebug('> Already reserved!', sess['sid'])
-            return
+            return True
 
         resp = self.reserve_srv(name=sess['sid'],
                                 entry=sess['entry_loc'],
                                 exit=sess['exit_loc'],
                                 time_ref=sess['arrival_time'].isoformat(),
                                 earliest_entry=0,
-                                latest_entry=0.5)
+                                latest_entry=3) # Let server choose when exactly to enter
     
-        assert resp.success, f'Reservation failed: {resp.reason}'
+        if not resp.success:
+            rospy.loginfo('Reservation for %s failed: %s', sess['sid'], resp.reason)
+            return False
+        
         rospy.logdebug(f'> Reservation succeeded!')
 
-        sess['time_ref'] = resp.time_ref
+        sess['time_ref'] = datetime.fromisoformat(resp.time_ref)
         sess['earliest_entry'] = resp.earliest_entry
         sess['latest_entry'] = resp.latest_entry
         sess['earliest_exit'] = resp.earliest_exit
@@ -324,12 +365,13 @@ class Vehicle:
         sess['departure_time'] = sess['time_ref'] + timedelta(seconds=sess['earliest_exit'])
         sess['reserved'] = True
 
-        rospy.logdebug(f'> Reservation complete for %s', sess['sid'])
+        rospy.logdebug('> Reservation complete for %s', sess['sid'])
+        return True
 
     def run(self):
 
         ## Wait for init time
-        start_time = datetime.now() + timedelta(seconds=self.INIT_WAIT)
+        start_time = datetime.now() + self.INIT_WAIT
 
         ## Initialize sessions
         with self.sessions_lock('run (Initialize sessions)'):
@@ -353,8 +395,9 @@ class Vehicle:
                 if self.sessions[active_session_id]['departure_time'] <= datetime.now():
                     self.session_order = self.session_order[1:]
                     active_session_id = self.session_order[0]
+                
+                limits_mask = self.sessions[active_session_id]['limits']
 
-            limits_mask = self.limits.get(active_session_id, None)
             if limits_mask is None:
                 rospy.logwarn('Missing driving limits')
             else:
