@@ -58,6 +58,59 @@ def earliest_window(mask, N=1, M=None):
             break
     return np.arange(i, i+n)
 
+import numpy as np
+
+def latest_window(mask, N=1, M=None):
+    """
+    Find the last maximal window where at least N but less than M consecutive elements are True.
+    
+    Parameters:
+    mask (array-like): A boolean array.
+    N (int): The minimum length of consecutive True values.
+    M (int or None): The maximum length of consecutive True values (None means no upper limit).
+    
+    Returns:
+    np.ndarray: Indices of the last maximal window of True values.
+    """
+    mask = np.asarray(mask)
+    length = len(mask)
+    
+    # Variables to track the current window
+    current_start = None
+    current_length = 0
+    
+    # Variables to track the best (latest) window that satisfies the constraints
+    best_start = None
+    best_end = None
+    
+    # Traverse through the array to find connected windows of True values
+    for i in range(length):
+        if mask[i]:
+            if current_start is None:
+                current_start = i  # Start a new window
+            current_length += 1
+        else:
+            # Check if the current window satisfies the N and M constraints
+            if current_length >= N and (M is None or current_length < M):
+                best_start = current_start
+                best_end = i  # End of the window is the last False element
+            # Reset the current window
+            current_start = None
+            current_length = 0
+    
+    # Final check at the end of the array (in case the array ends with a valid window)
+    if current_length >= N and (M is None or current_length < M):
+        best_start = current_start
+        best_end = length  # End is the end of the array
+    
+    # If we found a valid window, return its indices
+    if best_start is not None and best_end is not None:
+        return np.arange(best_start, best_end)
+    
+    # If no valid window was found, return an empty array
+    return np.array([], int)
+
+
 def val2ind(x, axis, **kwargs):
     setdefaults(kwargs,
                 min_bounds=RC['min_bounds'],
@@ -159,7 +212,7 @@ class Solver:
 
         return np.array(spatial_deriv)
 
-    @trybreak
+    # @trybreak
     def brs(self, times, target, constraints=None, *, mode='reach', interactive=True):
         jnp = hj.solver.jnp
         times = -jnp.asarray(times)
@@ -177,11 +230,11 @@ class Solver:
                           times, 
                           target, 
                           constraints,
-                          progress_bar=interactive)
+                          progress_bar=False) # progress_bar=interactive)
         values = jnp.flip(values, axis=0)
         return np.asarray(values)
 
-    @trybreak
+    # @trybreak
     def frs(self, times, target, constraints=None, *, mode='avoid', interactive=True):
         jnp = hj.solver.jnp
         times = jnp.asarray(times)
@@ -194,7 +247,7 @@ class Solver:
                           times,
                           target,
                           constraints,
-                          progress_bar=interactive)
+                          progress_bar=False) # progress_bar=interactive)
         return np.asarray(values)
     
     def lrcs(self, vf, x, i):
@@ -399,7 +452,10 @@ class Solver:
             min_nsteps = ceil(min_window_exit / self.time_step)
             max_nsteps = ceil(max_window_exit / self.time_step)
             arrival_target = shp.intersection(output, end)
-            arrival_window = earliest_window(shp.project_onto(arrival_target, 0) <= 0, min_nsteps)
+            mask = shp.project_onto(arrival_target, 0) <= 0
+            # mask[:j+10] = 0 # False
+            arrival_window = earliest_window(mask, min_nsteps)
+            print(mask, arrival_window,  j)
             assert arrival_window.size > 0, 'Analysis Failed: No time window to exit region'
             w0 = 0
             wn = min(max_nsteps+1, len(arrival_window)-1)

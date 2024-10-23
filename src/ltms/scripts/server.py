@@ -81,35 +81,47 @@ def around(l, e, n):
     return [l[(i+j) % N] for j in range(-n, n+1)]
 
 _LOCATIONS = [
-    'center_e', 'center_ene', 'center_ne', 'center_nne',
-    'center_n', 'center_nnw', 'center_nw', 'center_wnw',
-    'center_w', 'center_wsw', 'center_sw', 'center_ssw',
-    'center_s', 'center_ese', 'center_se', 'center_sse',
+    'center_e', 
+    # 'center_ene', 
+    'center_ne', 
+    # 'center_nne',
+    'center_n', 
+    # 'center_nnw', 
+    'center_nw', 
+    # 'center_wnw',
+    'center_w', 
+    # 'center_wsw', 
+    'center_sw', 
+    # 'center_ssw',
+    'center_s', 
+    # 'center_ese', 
+    'center_se', 
+    # 'center_sse',
 ]
 _PERMITTED_ROUTES = {
-    (_entry, _exit): ('outside',)
+    (_entry, _exit): ('full',)
     for _entry in _LOCATIONS
-    for _exit in set(_LOCATIONS) - set(around(_LOCATIONS, _entry, 4)) # flip
+    for _exit in set(around(_LOCATIONS, _entry, 1)) - {_entry}
 }
 
 class Server:
 
     AVOID_MARGIN = 0.4
-    TIME_HORIZON = 5
+    TIME_HORIZON = 15
     TIME_STEP = 0.2
 
     MAX_WINDOW_ENTRY = 2
 
-    SESSION_TIMEOUT = timedelta(minutes=2)
+    SESSION_TIMEOUT = timedelta(seconds=30)
     TRANSIT_TIME = 5 # [s] made up, roughly accurate
-    COMPUTE_TIME = 3 # [s] made up, roughly accurate
+    COMPUTE_TIME = 5 # [s] made up, roughly accurate
 
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
-    LOCATIONS = _LOCATIONS + ['outside']
+    LOCATIONS = _LOCATIONS + ['full', 'init']
     PERMITTED_ROUTES = _PERMITTED_ROUTES | {
-        ('init', _exit): ('outside',)
-        for _exit in 'center_ne center_ene center_e'.split()
+        ('init', _exit): ('full',)
+        for _exit in 'center_e'.split()
     }
 
     def __init__(self):
@@ -164,9 +176,9 @@ class Server:
         def clean_sessions_tmr(event):
             now = datetime.now().replace(microsecond=0)
             with self.sessions_lock('clean_sessions_tmr'):
-                for id_, sess in self.get_sessions:
+                for sid, sess in self.get_sessions:
                     if sess['session_timeout'] < now:
-                        sess = self.sessions.pop(id_)
+                        del self.sessions[sid]
         rospy.Timer(rospy.Duration(2), clean_sessions_tmr)
 
         ## Advertise services
@@ -235,25 +247,26 @@ class Server:
         with self.sessions_lock('get_sessions'):
             return list(self.sessions.items())
     
-    def sessions_add(self, key, dict1=None, **kwds):
+    def sessions_add(self, sid, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
         with self.sessions_lock('sessions_add'):
-            self.sessions[key] = kwds if dict1 is None else dict1
+            self.sessions[sid] = kwds if dict1 is None else dict1
 
-    def select_session(self, key):
+    def select_session(self, sid):
         with self.sessions_lock('select_session'):
-            if key in self.sessions:
-                yield self.sessions[key]
+            if sid in self.sessions:
+                yield self.sessions[sid]
 
     @property
     def get_reservations(self):
-        return [(id_, sess['reservation']) for id_, sess in self.iter_sessions]
+        return [(sid, sess['reservation']) for sid, sess in self.iter_sessions if sess['reserved']]
     
-    def add_resevation(self, key, dict1=None, **kwds):
+    def add_reservation(self, sid, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
         with self.sessions_lock('add_reservation'):
-            with self.sessions[key]['reservation_lock']:
-                self.sessions[key]['reservation'] = kwds if dict1 is None else dict1
+            for sess in self.select_session(sid):
+                sess['reservation'] = kwds if dict1 is None else dict1
+                sess['reserved'] = True
     
     @service_wrp(Connect, method=True)
     def connect_srv(self, req, resp):
@@ -271,8 +284,8 @@ class Server:
         self.sessions_add(usr_id,
                           arrival_time=arrival_time,
                           session_timeout=session_timeout,
-                          reservation={},
-                          reservation_lock=RLock())
+                          reserved=False,
+                          reservation={})
 
         resp.its_id = its_id
         resp.transit_time = self.TRANSIT_TIME
@@ -285,8 +298,8 @@ class Server:
         arrival_time = datetime.fromisoformat(req.arrival_time)
 
         num_unreserved = 0
-        for id_, sess in self.get_sessions:
-            if id_ == req.usr_id: continue
+        for sid, sess in self.get_sessions:
+            if sid == req.usr_id: continue
             if not 0 <= (arrival_time - sess['arrival_time']).total_seconds() <= self.TIME_HORIZON: continue
             if not sess['reservation']:
                 num_unreserved += 1
@@ -357,17 +370,129 @@ class Server:
         self.reserve(req.name, req, resp)
 
         if not resp.success:
-            rospy.loginfo(f"Reservation {resp.id} ({req.name}) recjected: {resp.reason}")
+            rospy.loginfo(f"Reservation for {req.name} recjected: {resp.reason}")
             return
 
-        rospy.loginfo(f"Reservation {resp.id} ({req.name}) approved.")
+        rospy.loginfo(f"Reservation for {req.name} approved.")
+
+    def reserve(self, sid, req, resp):
+
+        try:
+            time_ref = datetime.fromisoformat(req.time_ref)
+        except Exception:
+            resp.reason = f"Malformed ISO time: '{req.time_ref}'."
+            return
         
-    def resolve_dangers(self, time_ref):
+        output = {}
+        try:
+            earliest_entry = round(max(req.earliest_entry, 0), 1)
+            latest_entry = round(min(req.latest_entry, self.TIME_HORIZON), 1)
+            
+            offset = round(floor(earliest_entry) + (earliest_entry % self.TIME_STEP), 1)
+            time_ref += timedelta(seconds=offset)
+            earliest_entry -= offset
+            latest_entry -= offset
+            assert 0 <= earliest_entry <= latest_entry <= self.TIME_HORIZON, \
+                f'Negotiation Failed: Invalid window offsetting (offset={offset})'
+
+            max_window_entry = round(min(latest_entry - earliest_entry, self.MAX_WINDOW_ENTRY), 1)
+            assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
+            
+            dangers = self.resolve_dangers(time_ref)
+            dangers = [danger
+                       for _id, danger in dangers.items()
+                       if _id[:5] != sid[:5]]
+
+            doubt = {'pass1': self.offline_passes[req.entry, req.exit]}
+            output = self.solver.run_analysis('pass2',
+                                              min_window_entry=1,  max_window_entry=max_window_entry,
+                                              min_window_exit=1, max_window_exit=2.0,
+                                              pass1=self.offline_passes[req.entry, req.exit],
+                                              entry=self.environment[req.entry],
+                                              exit=self.environment[req.exit],
+                                              dangers=dangers,
+                                              interactive=False)
+            doubt['pass2'] = output['pass2'].copy()
+            output = self.solver.run_analysis('pass3',
+                                              min_window_entry=1,  max_window_entry=max_window_entry,
+                                              min_window_exit=1, max_window_exit=2.0,
+                                              pass1=self.offline_passes[req.entry, req.exit],
+                                              pass2=output['pass2'],
+                                              entry=self.environment[req.entry],
+                                              exit=self.environment[req.exit],
+                                              dangers=dangers,
+                                              interactive=False)
+            doubt['pass3'] = output['pass3'].copy()
+            output = self.solver.run_analysis('pass4',
+                                              min_window_entry=1,  max_window_entry=max_window_entry,
+                                              min_window_exit=1, max_window_exit=2.0,
+                                              pass1=self.offline_passes[req.entry, req.exit],
+                                              entry=self.environment[req.entry],
+                                              exit=self.environment[req.exit],
+                                              dangers=dangers,
+                                              interactive=True)
+            doubt['pass4'] = output['pass4'].copy()
+
+            earliest_entry = max(earliest_entry, output['earliest_entry'])
+            latest_entry = min(latest_entry, output['latest_entry'])
+            earliest_exit = output['earliest_exit']
+            latest_exit = output['latest_exit']
+            assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
+
+        except AssertionError as e:
+            msg, = e.args
+            resp.reason = f'Reservation Error: {msg}'
+
+        else:
+            self.add_reservation(sid,
+                                 name=req.name, 
+                                 time_ref=time_ref,
+                                 entry=req.entry, exit=req.exit,
+                                 earliest_entry=earliest_entry,
+                                 latest_entry=latest_entry,
+                                 earliest_exit=earliest_exit,
+                                 latest_exit=latest_exit,
+                                 analysis=output)
+            
+            # flat_corridor = shp.project_onto(output['pass4'], 1, 2) <= 0
+
+            resp.time_ref = time_ref.isoformat()
+            resp.earliest_entry = earliest_entry
+            resp.latest_entry = latest_entry
+            resp.earliest_exit = earliest_exit
+            resp.latest_exit = latest_exit
+            # resp.shape = list(flat_corridor.shape)
+            # resp.corridor = flat_corridor.tobytes()
+            resp.success = True
+            resp.reason = ''
+
+        ## DEBUG
+        finally:
+            if not output: return
+
+            for p in 'pass1 pass2 pass3 pass4'.split():
+                if p in doubt:
+                    np.save(f'/svea_ws/src/ltms/data/{sid}-{p}.npy', doubt[p], allow_pickle=True)
+            
+            # with open(f'/svea_ws/src/ltms/data/{sid}.json', 'w') as f:
+            #     json.dump({
+            #         'time_ref': time_ref.isoformat(),
+            #         'earliest_entry': earliest_entry,
+            #         'latest_entry': latest_entry,
+            #         'earliest_exit': earliest_exit,
+            #         'latest_exit': latest_exit,
+            #         'output_earliest_entry': output['earliest_entry'],
+            #         'output_latest_entry': output['latest_entry'],
+            #         'output_earliest_exit': output['earliest_exit'],
+            #         'output_latest_exit': output['latest_exit'],
+            #     }, f)
+        
+    def resolve_dangers(self, time_ref, quiet=False):
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
         
-        dangers = []
-        for _, reservation in self.get_reservations:
+        dangers = {}
+        for sid, reservation in self.get_reservations:
             earliest_overlap = max(time_ref, reservation['time_ref'])
             latest_overlap = min(time_ref + td_horizon, reservation['time_ref'] + td_horizon)
             overlap = (latest_overlap - earliest_overlap).total_seconds()
@@ -392,85 +517,27 @@ class Server:
                 i = ceil(i_offset / self.TIME_STEP)
                 j = ceil(j_offset / self.TIME_STEP)
                 danger[:j] = reservation['analysis']['pass4'][i:i+j]
-            dangers.append(danger)
+            dangers[sid] = danger
 
-        if not dangers:
+        if not dangers and not quiet:
             rospy.loginfo('Intersection free!')
 
         return dangers
 
-    def reserve(self, usr_id, req, resp):
-
-        try:
-            time_ref = datetime.fromisoformat(req.time_ref)
-        except Exception:
-            resp.reason = f"Malformed ISO time: '{req.time_ref}'."
-            return
-        
-        try:
-            earliest_entry = round(max(req.earliest_entry, 0), 1)
-            latest_entry = round(min(req.latest_entry, self.TIME_HORIZON), 1)
-            
-            offset = round(floor(earliest_entry) + (earliest_entry % self.TIME_STEP), 1)
-            time_ref += timedelta(seconds=offset)
-            earliest_entry -= offset
-            latest_entry -= offset
-            assert 0 <= earliest_entry <= latest_entry <= self.TIME_HORIZON, \
-                f'Negotiation Failed: Invalid window offsetting (offset={offset})'
-
-            max_window_entry = round(min(latest_entry - earliest_entry, self.MAX_WINDOW_ENTRY), 1)
-            assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
-            
-            dangers = self.resolve_dangers(time_ref)
-            output = self.solver.run_analysis('pass4',
-                                              max_window_entry=max_window_entry,
-                                              pass1=self.offline_passes[req.entry, req.exit],
-                                              entry=self.environment[req.entry],
-                                              exit=self.environment[req.exit],
-                                              dangers=dangers)
-            
-            earliest_entry = max(earliest_entry, output['earliest_entry'])
-            latest_entry = min(latest_entry, output['latest_entry'])
-            earliest_exit = output['earliest_exit']
-            latest_exit = output['latest_exit']
-            assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
-
-        except AssertionError as e:
-            msg, = e.args
-            resp.reason = f'Reservation Error: {msg}'
-            return
-
-        else:
-            self.add_resevation(usr_id,
-                                name=req.name, 
-                                time_ref=time_ref,
-                                entry=req.entry, exit=req.exit,
-                                earliest_entry=earliest_entry,
-                                latest_entry=latest_entry,
-                                earliest_exit=earliest_exit,
-                                latest_exit=latest_exit,
-                                analysis=output)
-            
-            flat_corridor = shp.project_onto(output['pass4'], 1, 2) <= 0
-
-            resp.time_ref = time_ref.isoformat()
-            resp.earliest_entry = earliest_entry
-            resp.latest_entry = latest_entry
-            resp.earliest_exit = earliest_exit
-            resp.latest_exit = latest_exit
-            resp.shape = list(flat_corridor.shape)
-            resp.corridor = flat_corridor.tobytes()
-            resp.success = True
-            resp.reason = ''
-
-            # np.save(f'/svea_ws/src/ltms/data/{req.name}.npy', corridor, allow_pickle=True)
-            
-            # meta['time_ref'] = time_ref.isoformat()
-            # with open(f'/svea_ws/src/ltms/data/{req.name}.json', 'w') as f:
-            #     json.dump(meta, f)
+    def tube_to_marker(self, tube):
+        pass
 
     def run(self):
-        rospy.spin()
+        
+        rate = rospy.Rate(5)
+
+        while not rospy.is_shutdown():
+            now = datetime.now()
+
+            for tube in self.resolve_dangers(now, quiet=True):
+                marker = self.tube_to_marker(tube)
+
+            rate.sleep()
 
 if __name__ == '__main__':
 

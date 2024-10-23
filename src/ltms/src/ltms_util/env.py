@@ -23,145 +23,149 @@ def create_chaos(grid, *envs):
 
     if not envs:
         envs += centers
-        envs += ('init', 'outside')
+        envs += ('init', 'full')
 
     envs_out = tuple(envs)
     envs_sch = tuple(envs)
 
     if set(centers) & set(envs_sch) and 'center' not in envs_sch:
         envs_sch += ('center',)
-    if 'outside' in envs_sch and 'init' not in envs_sch:
+    if 'full' in envs_sch and 'init' not in envs_sch:
         envs_sch += ('init',)
 
     (H_W, H_WSW, H_SW, H_SSW,
      H_S, H_ESE, H_SE, H_SSE,
      H_E, H_ENE, H_NE, H_NNE,
-     H_N, H_NNW, H_NW, H_WNW) = [x*pi/16 - pi/2 for x in range(16)]
+     H_N, H_NNW, H_NW, H_WNW) = [-pi + (2*pi/16)*x for x in range(16)]
+
+    H_MARGIN = 2*pi/16 * 0.8
 
     if 'center' in envs_sch:
         out['center'] = shp.rectangle(grid, axes=[X, Y],
-                                      target_min=[X0 - 0.05*XN, Y0 - 0.05*YN],
-                                      target_max=[X0 + 0.05*XN, Y0 + 0.05*YN])
+                                      target_min=[X0 + (0.5-0.1)*XN, Y0 + (0.5-0.1)*YN],
+                                      target_max=[X0 + (0.5+0.1)*XN, Y0 + (0.5+0.1)*YN])
 
     if 'center_w' in envs_sch:
         out['center_w'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_W - pi/5],
-                          target_max=[H_W + pi/5]),
+                          target_min=[H_W - H_MARGIN],
+                          target_max=[H_W + H_MARGIN]),
             out['center'],
         )
     if 'center_wsw' in envs_sch:
         out['center_wsw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_WSW - pi/5],
-                          target_max=[H_WSW + pi/5]),
+                          target_min=[H_WSW - H_MARGIN],
+                          target_max=[H_WSW + H_MARGIN]),
             out['center'],
         )
     if 'center_sw' in envs_sch:
         out['center_sw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_SW - pi/5],
-                          target_max=[H_SW + pi/5]),
+                          target_min=[H_SW - H_MARGIN],
+                          target_max=[H_SW + H_MARGIN]),
             out['center'],
         )
     if 'center_ssw' in envs_sch:
         out['center_ssw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_SSW - pi/5],
-                          target_max=[H_SSW + pi/5]),
+                          target_min=[H_SSW - H_MARGIN],
+                          target_max=[H_SSW + H_MARGIN]),
             out['center'],
         )
     if 'center_s' in envs_sch:
         out['center_s'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_S - pi/5],
-                          target_max=[H_S + pi/5]),
+                          target_min=[H_S - H_MARGIN],
+                          target_max=[H_S + H_MARGIN]),
             out['center'],
         )
     if 'center_ese' in envs_sch:
         out['center_ese'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_ESE - pi/5],
-                          target_max=[H_ESE + pi/5]),
+                          target_min=[H_ESE - H_MARGIN],
+                          target_max=[H_ESE + H_MARGIN]),
             out['center'],
         )
     if 'center_se' in envs_sch:
         out['center_se'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_SE - pi/5],
-                          target_max=[H_SE + pi/5]),
+                          target_min=[H_SE - H_MARGIN],
+                          target_max=[H_SE + H_MARGIN]),
             out['center'],
         )
     if 'center_sse' in envs_sch:
         out['center_sse'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_SSE - pi/5],
-                          target_max=[H_SSE + pi/5]),
+                          target_min=[H_SSE - H_MARGIN],
+                          target_max=[H_SSE + H_MARGIN]),
             out['center'],
         )
     if 'center_e' in envs_sch:
         out['center_e'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_E - pi/5],
-                          target_max=[H_E + pi/5]),
+                          target_min=[H_E - H_MARGIN],
+                          target_max=[H_E + H_MARGIN]),
             out['center'],
         )
     if 'center_ene' in envs_sch:
         out['center_ene'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_ENE - pi/5],
-                          target_max=[H_ENE + pi/5]),
+                          target_min=[H_ENE - H_MARGIN],
+                          target_max=[H_ENE + H_MARGIN]),
             out['center'],
         )
     if 'center_ne' in envs_sch:
         out['center_ne'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_NE - pi/5],
-                          target_max=[H_NE + pi/5]),
+                          target_min=[H_NE - H_MARGIN],
+                          target_max=[H_NE + H_MARGIN]),
             out['center'],
         )
     if 'center_nne' in envs_sch:
         out['center_nne'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_NNE - pi/5],
-                          target_max=[H_NNE + pi/5]),
+                          target_min=[H_NNE - H_MARGIN],
+                          target_max=[H_NNE + H_MARGIN]),
             out['center'],
         )
     if 'center_n' in envs_sch:
         out['center_n'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_N - pi/5],
-                          target_max=[H_N + pi/5]),
+                          target_min=[H_N - H_MARGIN],
+                          target_max=[H_N + H_MARGIN]),
             out['center'],
         )
     if 'center_nnw' in envs_sch:
         out['center_nnw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_NNW - pi/5],
-                          target_max=[H_NNW + pi/5]),
+                          target_min=[H_NNW - H_MARGIN],
+                          target_max=[H_NNW + H_MARGIN]),
             out['center'],
         )
     if 'center_nw' in envs_sch:
         out['center_nw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_NW - pi/5],
-                          target_max=[H_NW + pi/5]),
+                          target_min=[H_NW - H_MARGIN],
+                          target_max=[H_NW + H_MARGIN]),
             out['center'],
         )
     if 'center_wnw' in envs_sch:
         out['center_wnw'] = shp.intersection(
             shp.rectangle(grid, axes=[H],
-                          target_min=[H_WNW - pi/5],
-                          target_max=[H_WNW + pi/5]),
+                          target_min=[H_WNW - H_MARGIN],
+                          target_max=[H_WNW + H_MARGIN]),
             out['center'],
         )
 
     if 'init' in envs_sch:
-        out['init'] = shp.rectangle(grid, axes=[X, Y],
-                                    target_min=[X0, Y0],
-                                    target_max=[X0 + 0.075*XN, Y0 + 0.15*YN])
-    if 'outside' in envs_sch:
-        out['outside'] = shp.complement(out['init'])
+        out['init'] = shp.rectangle(grid, axes=[X, Y, H],
+                                    target_min=[X0,            Y0,              H_N - H_MARGIN],
+                                    target_max=[X0 + 0.15*XN, Y0 + 0.23*YN,     H_N + H_MARGIN])
+    if 'full' in envs_sch:
+        out['full'] = shp.rectangle(grid, axes=[V],
+                                    target_min=[0.3],
+                                    target_max=[0.6])
 
     return {name: out[name] for name in envs_out}
 

@@ -51,10 +51,11 @@ def setminus(a, *bs):
         result = np.maximum(result, -b)
     return result
 
-def project_onto(vf, *idxs, keepdims=False):
+def project_onto(vf, *idxs, keepdims=False, union=True):
     idxs = [len(vf.shape) + i if i < 0 else i for i in idxs]
     dims = [i for i in range(len(vf.shape)) if i not in idxs]
-    return vf.min(axis=tuple(dims), keepdims=keepdims)
+    return (vf.min(axis=tuple(dims), keepdims=keepdims) if union else
+            vf.max(axis=tuple(dims), keepdims=keepdims))
 
 def aproject_onto(vf, *idxs, keepdims=False):
     idxs = [len(vf.shape) + i if i < 0 else i for i in idxs]
