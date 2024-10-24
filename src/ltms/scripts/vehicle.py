@@ -193,6 +193,7 @@ class Vehicle:
             state.v = twist.twist.linear.x
             self.state = state
 
+            rospy.loginfo('Sending state')
             for sid in list(self.session_order):
                 state.child_frame_id = sid
                 self.State.publish(state)
