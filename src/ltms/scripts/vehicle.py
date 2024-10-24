@@ -278,30 +278,29 @@ class Vehicle:
         return sid
 
     def sessions_update(self):
-        with self.sessions_lock('sessions_update'):
-            now = datetime.now()
+        now = datetime.now()
 
-            skip = False
-            for sid in self.session_order:
-                sess = self.sessions[sid]
-                with sess['lock']('sessions_update'):
-                    
-                    if sess['reserved'] or not self.reserve_q.empty():
-                        # no need to update / don't spam queue.
-                        pass
-                    elif not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
+        one_reserved = False
+        for sid in list(self.session_order):
+            sess = self.sessions[sid]
+            with sess['lock']('sessions_update'):
+
+                if not one_reserved and self.reserve_q.empty():
+                    if sess['reserved']:
+                        pass # no need to update
+                    elif sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
                         self.reserve_q.put(sess)
-                        skip = True # just put the first non-reserved on queue
+                else:
+                    # Justify arrival time and notify server
+                    resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
+                    sess['arrival_time'] = adjusted_arrival_time
+                    sess['departure_time'] = adjusted_arrival_time + timedelta(seconds=resp.transit_time)
 
-                    else:
-                        # Justify arrival time and notify server
-                        resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
-                        sess['arrival_time'] = adjusted_arrival_time
-                        sess['departure_time'] = adjusted_arrival_time + timedelta(seconds=resp.transit_time)
+                # next arrival is depart from this region
+                adjusted_arrival_time = sess['departure_time']
+                entry_loc = sess['exit_loc']
 
-                    # next arrival is depart from this region
-                    adjusted_arrival_time = sess['departure_time']
-                    entry_loc = sess['exit_loc']
+        with self.sessions_lock('sessions_update'):
 
             cleanup = [sid
                        for sid, sess in self.iter_sessions
