@@ -41,7 +41,7 @@ def create_chaos(grid, *envs):
      H_E, H_ENE, H_NE, H_NNE,
      H_N, H_NNW, H_NW, H_WNW) = [x*2*pi/16 - 2*pi/2 for x in range(16)]
 
-    H_MARGIN = 2*pi/32
+    H_MARGIN = 2*pi/16
 
     if 'center' in envs_sch:
         out['center'] = shp.rectangle(grid, axes=[X, Y],
@@ -164,7 +164,7 @@ def create_chaos(grid, *envs):
     if 'init' in envs_sch:
         out['init'] = shp.rectangle(grid, axes=[X, Y],
                                     target_min=[X0, Y0],
-                                    target_max=[X0 + 0.075*XN, Y0 + 0.15*YN])
+                                    target_max=[X0 + 0.5, Y0 + 0.6])
     if 'full' in envs_sch:
         out['full'] = shp.rectangle(grid, axes=[V],
                                     target_min=[0.3],

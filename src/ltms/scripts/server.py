@@ -90,7 +90,7 @@ _PERMITTED_ROUTES = {
 class Server:
 
     AVOID_MARGIN = 0.4
-    TIME_HORIZON = 10
+    TIME_HORIZON = 12
     TIME_STEP = 0.2
 
     MAX_WINDOW_ENTRY = 2
@@ -146,8 +146,8 @@ class Server:
                              dynamics=dict(cls=self.MODEL,
                                            min_steer=-pi * 5/4, 
                                            max_steer=+pi * 5/4,
-                                           min_accel=-0.3, 
-                                           max_accel=+0.3),
+                                           min_accel=-0.5, 
+                                           max_accel=+0.5),
                              interactive=False)
 
         self.environment = self.load_environment()
@@ -366,7 +366,12 @@ class Server:
             resp.reason = f"Malformed ISO time: '{req.time_ref}'."
             return
         
-        output = {}
+        # Debugging path
+        save_path = None # to disable
+        save_path = Path(f'/svea_ws/src/ltms/data/{sid}')
+        save_path.mkdir(exist_ok=True)
+
+        result = {}
         try:
             earliest_entry = round(max(req.earliest_entry, 0), 1)
             latest_entry = round(min(req.latest_entry, self.TIME_HORIZON), 1)
@@ -386,7 +391,6 @@ class Server:
                        for _id, danger in dangers.items()
                        if _id[:5] != sid[:5]]
 
-            result = {}
             self.solver.run_analysis('pass2', 'pass3', 'pass4',
                                      min_window_entry=1,  max_window_entry=max_window_entry,
                                      min_window_exit=1, max_window_exit=2.0,
@@ -395,6 +399,7 @@ class Server:
                                      exit=self.environment[req.exit],
                                      dangers=dangers,
                                      result=result,
+                                     save_path=save_path,
                                      interactive=True)
 
             earliest_entry = max(earliest_entry, result['earliest_entry'])
@@ -430,26 +435,18 @@ class Server:
             resp.success = True
             resp.reason = ''
 
-        ## DEBUG
-        finally:
-            if not result: return
-
-            for p in 'pass1 pass2 pass3 pass4'.split():
-                if p in result:
-                    np.save(f'/svea_ws/src/ltms/data/{sid}-{p}.npy', result[p], allow_pickle=True)
-            
-            # with open(f'/svea_ws/src/ltms/data/{sid}.json', 'w') as f:
-            #     json.dump({
-            #         'time_ref': time_ref.isoformat(),
-            #         'earliest_entry': earliest_entry,
-            #         'latest_entry': latest_entry,
-            #         'earliest_exit': earliest_exit,
-            #         'latest_exit': latest_exit,
-            #         'output_earliest_entry': result['earliest_entry'],
-            #         'output_latest_entry': result['latest_entry'],
-            #         'output_earliest_exit': result['earliest_exit'],
-            #         'output_latest_exit': result['latest_exit'],
-            #     }, f)
+        # with open(f'/svea_ws/src/ltms/data/{sid}.json', 'w') as f:
+        #     json.dump({
+        #         'time_ref': time_ref.isoformat(),
+        #         'earliest_entry': earliest_entry,
+        #         'latest_entry': latest_entry,
+        #         'earliest_exit': earliest_exit,
+        #         'latest_exit': latest_exit,
+        #         'output_earliest_entry': result['earliest_entry'],
+        #         'output_latest_entry': result['latest_entry'],
+        #         'output_earliest_exit': result['earliest_exit'],
+        #         'output_latest_exit': result['latest_exit'],
+        #     }, f)
         
     def resolve_dangers(self, time_ref, quiet=False):
 

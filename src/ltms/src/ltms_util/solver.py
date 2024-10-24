@@ -311,6 +311,7 @@ class Solver:
         max_window_entry = kwargs.pop('max_window_entry', max_window)
         min_window_exit = kwargs.pop('min_window_exit', min_window)
         max_window_exit = kwargs.pop('max_window_exit', max_window)
+        save_path = kwargs.pop('save_path', None)
         result = kwargs.pop('result', {})
 
         ALL_PASSES = ['pass1', 'pass2', 'pass3', 'pass4']
@@ -363,6 +364,7 @@ class Solver:
 
             result['comp_time_pass1'] = comp_time
             if 'pass1' in passes_out: result['pass1'] = vf.copy()
+            if save_path is not None: np.save(f'{save_path}/pass1.npy', vf, allow_pickle=True)
 
         if 'pass2' in passes_sch:
             if interactive: print('Pass 2: Avoidance')
@@ -400,6 +402,7 @@ class Solver:
 
             result['comp_time_pass2'] = comp_time
             if 'pass2' in passes_out: result['pass2'] = vf.copy()
+            if save_path is not None: np.save(f'{save_path}/pass2.npy', vf, allow_pickle=True)
 
         if 'pass3' in passes_sch:
             if interactive: print('Pass 3: Planning, Entry')
@@ -436,6 +439,7 @@ class Solver:
             result['earliest_entry'] = self.timeline[i]
             result['latest_entry'] = self.timeline[j-1]
             if 'pass3' in passes_out: result['pass3'] = vf.copy()
+            if save_path is not None: np.save(f'{save_path}/pass3.npy', vf, allow_pickle=True)
 
             if debug: result['entry_target'] = depart_target
 
@@ -449,15 +453,21 @@ class Solver:
             min_nsteps = ceil(min_window_exit / self.time_step)
             max_nsteps = ceil(max_window_exit / self.time_step)
             arrival_target = shp.intersection(vf, end)
-            arrival_target_times = shp.project_onto(arrival_target, 0, 1, 2)
-            arrival_target_times = shp.project_onto(arrival_target_times, 0, union=False)
-            arrival_window = earliest_window(arrival_target_times <= 0, min_nsteps)
-            print(arrival_target_times <= 0, arrival_window,  j)
-            assert arrival_window.size > 0, 'Analysis Failed: No time window to exit region'
+
+            # Approach 1
+            arrival_window_1 = earliest_window(shp.project_onto(arrival_target, 0) <= 0, min_nsteps)
+            # Approach 2
+            arrival_target_times = shp.setminus(shp.project_onto(end, 0, 1),
+                                                shp.project_onto(arrival_target, 0, 1, 2))
+            arrival_target_times = shp.project_onto(arrival_target_times, 0)
+            arrival_target_times = shp.complement(arrival_target_times)
+            arrival_window_2 = earliest_window(arrival_target_times <= 0, min_nsteps)
+            
+            assert arrival_window_2.size > 0, 'Analysis Failed: No time window to exit region'
             w0 = 0
-            wn = min(max_nsteps+1, len(arrival_window)-1)
-            m = arrival_window[w0] # Earliest exit index
-            n = arrival_window[wn] # Latest exit index
+            wn = min(max_nsteps+1, len(arrival_window_2)-1)
+            m = arrival_window_1[w0] # Earliest exit index
+            n = arrival_window_2[wn] # Latest exit index
             arrival_target[n:] = 1
 
             start_time = time()
@@ -477,6 +487,7 @@ class Solver:
             result['earliest_exit'] = self.timeline[m]
             result['latest_exit'] = self.timeline[n-1]
             if 'pass4' in passes_out: result['pass4'] = vf.copy()
+            if save_path is not None: np.save(f'{save_path}/pass4.npy', vf, allow_pickle=True)
 
             if debug: result['exit_target'] = arrival_target
 

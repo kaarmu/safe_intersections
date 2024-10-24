@@ -378,6 +378,7 @@ class Vehicle:
                 if self.sessions[active_session_id]['departure_time'] <= datetime.now():
                     self.session_order = self.session_order[1:]
                     active_session_id = self.session_order[0]
+                    rospy.loginfo('Changing session to %s', active_session_id)
                 
                 limits_mask = self.sessions[active_session_id]['limits']
 
