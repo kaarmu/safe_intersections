@@ -90,7 +90,7 @@ _PERMITTED_ROUTES = {
 class Server:
 
     AVOID_MARGIN = 0.4
-    TIME_HORIZON = 12
+    TIME_HORIZON = 15
     TIME_STEP = 0.2
 
     MAX_WINDOW_ENTRY = 2
@@ -280,25 +280,26 @@ class Server:
         now = datetime.now().replace(microsecond=0)
         arrival_time = datetime.fromisoformat(req.arrival_time)
 
+        resp.transit_time = self.TRANSIT_TIME
+
+        for sess in self.select_session(req.usr_id):
+            if sess['reserved']: return # don't update
+            sess['arrival_time'] = arrival_time
+            sess['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
+
         num_unreserved = 0
         for sid, sess in self.get_sessions:
             if sid == req.usr_id: continue
             if not 0 <= (arrival_time - sess['arrival_time']).total_seconds() <= self.TIME_HORIZON: continue
-            if not sess['reservation']:
+            if not sess['reserved']:
                 num_unreserved += 1
-        
+
         time_left = (arrival_time - now).total_seconds()
         time_needed = self.COMPUTE_TIME * (num_unreserved+1)
         if time_left <= time_needed:
             # will be negative; the time we're late with. minus sign indicates an error. 
             resp.transit_time = time_left - time_needed
-            return
 
-        for sess in self.select_session(req.usr_id):
-            sess['arrival_time'] = arrival_time
-            sess['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
-            resp.transit_time = self.TRANSIT_TIME
-    
     def state_cb(self, state_msg):
         now = datetime.now().replace(microsecond=0)
 

@@ -161,6 +161,7 @@ class Vehicle:
             while not rospy.is_shutdown():
                 sess = self.reserve_q.get()
                 with sess['lock']('reserve worker'):
+                    if sess['reserved']: return # just double check
                     success = self.reserve(sess)
                     if not success:
                         # Justify arrival time and notify server
@@ -283,11 +284,13 @@ class Vehicle:
             skip = False
             for sid in self.session_order:
                 sess = self.sessions[sid]
+                if sess['reserved'] or not self.reserve_q.empty():
+                    # no need to update / don't spam queue.
+                    # should be ok against data races bcs we double check in reserve worker
+                    pass
                 with sess['lock']('sessions_update'):
-                    if sess['reserved'] or not self.reserve_q.empty():
-                        pass # no need to update / don't spam queue
                     
-                    elif not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
+                    if not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
                         self.reserve_q.put(sess)
                         skip = True # just put the first non-reserved on queue
 
@@ -369,18 +372,20 @@ class Vehicle:
                 break
             rospy.sleep(0.1)
 
-        active_session_id = sid
         steering, velocity = 0, 0
+
+        active_session_id = sid
+        rospy.loginfo('Initial session: %s', active_session_id)
 
         while not rospy.is_shutdown():
 
-            with self.sessions_lock('run (Main Loop)'):
-                if self.sessions[active_session_id]['departure_time'] <= datetime.now():
-                    self.session_order = self.session_order[1:]
-                    active_session_id = self.session_order[0]
-                    rospy.loginfo('Changing session to %s', active_session_id)
-                
-                limits_mask = self.sessions[active_session_id]['limits']
+            # Maybe will cause data race in sessions_update 
+            if self.sessions[active_session_id]['departure_time'] <= datetime.now():
+                self.session_order = self.session_order[1:]
+                active_session_id = self.session_order[0]
+                rospy.loginfo('Changing session to %s', active_session_id)
+            
+            limits_mask = self.sessions[active_session_id]['limits']
 
             if limits_mask is None:
                 rospy.logwarn('Missing driving limits')

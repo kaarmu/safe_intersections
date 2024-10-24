@@ -2,7 +2,7 @@
 <launch>
 
     <!-- Launch arguments -->
-    <arg name="name"    default="svea0"/>
+    <arg name="name"    default="sveax"/>
     <arg name="area"    default="sml"/>
     <arg name="is_sim"  default="true"/>
 
