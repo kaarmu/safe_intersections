@@ -284,17 +284,16 @@ class Vehicle:
             skip = False
             for sid in self.session_order:
                 sess = self.sessions[sid]
-                if sess['reserved'] or not self.reserve_q.empty():
-                    # no need to update / don't spam queue.
-                    # should be ok against data races bcs we double check in reserve worker
-                    pass
                 with sess['lock']('sessions_update'):
                     
-                    if not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
+                    if sess['reserved'] or not self.reserve_q.empty():
+                        # no need to update / don't spam queue.
+                        pass
+                    elif not skip and sess['arrival_time'] <= now + self.RES_TIME_LIMIT:
                         self.reserve_q.put(sess)
                         skip = True # just put the first non-reserved on queue
 
-                    elif not sess['reserved']:
+                    else:
                         # Justify arrival time and notify server
                         resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
                         sess['arrival_time'] = adjusted_arrival_time
