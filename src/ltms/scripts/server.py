@@ -307,7 +307,7 @@ class Server:
         x = state_msg.x
         y = state_msg.y
         h = state_msg.yaw
-        v = state_msg.velocity
+        v = state_msg.v
 
         time_ref = self.sessions[usr_id]['reservation']['time_ref']
         pass4 = self.sessions[usr_id]['reservation']['analysis']['pass4']

@@ -179,6 +179,8 @@ class Vehicle:
 
         ## Initialize mocap
         
+        self.state = VehicleStateMsg()
+
         def state_cb(pose, twist):
             state = VehicleStateMsg()
             state.header = pose.header
@@ -193,12 +195,6 @@ class Vehicle:
             state.v = twist.twist.linear.x
             self.state = state
 
-            rospy.loginfo('Sending state')
-            for sid in list(self.session_order):
-                state.child_frame_id = sid
-                self.State.publish(state)
-                break # Trick to pick first one if there is one
-            
         mf.TimeSynchronizer([
             mf.Subscriber(f'/qualisys/{self.NAME}/pose', PoseStamped),
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
@@ -223,6 +219,14 @@ class Vehicle:
 
         self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
+
+        def limits_tmr(event):
+            rospy.loginfo('Sending state')
+            for sid in list(self.session_order):
+                self.state.child_frame_id = sid
+                self.State.publish(self.state)
+                break # Trick to pick first one if there is one
+        rospy.Timer(rospy.Duration(0.5), limits_tmr)
 
         ## Node initialized
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
