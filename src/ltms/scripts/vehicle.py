@@ -87,7 +87,7 @@ _LOCATIONS = ['left', 'top', 'right', 'bottom']
 _PERMITTED_ROUTES = {
     (_entry, _exit): ('full',)
     for _entry in _LOCATIONS
-    for _exit in set(_LOCATIONS) - {_entry}
+    for _exit in set(_LOCATIONS) - {_entry, _LOCATIONS[_LOCATIONS.index(_entry)-1]}
 }
 
 class Vehicle:
