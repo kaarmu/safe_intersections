@@ -373,7 +373,7 @@ class Server:
             for n, j in enumerate(jdx)
         ])
 
-        mask, ctrl_vecs = self.solver.lrcs(pass4[i], state, i)
+        mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
 
         limits_msg = NamedBytes(usr_id, mask.tobytes())
         self.Limits.publish(limits_msg)
