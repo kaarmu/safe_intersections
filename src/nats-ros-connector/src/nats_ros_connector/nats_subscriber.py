@@ -48,5 +48,6 @@ class NATSSubscriber:
             await self.nats_sub.unsubscribe()
         
         # Unregister ROS topic and leave to GC
-        self.ros_pub.unregister()
-        self.ros_pub = None
+        if self.ros_pub is not None:
+            self.ros_pub.unregister()
+            self.ros_pub = None
