@@ -1,5 +1,7 @@
 #! /usr/bin/env python3
 
+from svea.controllers.pure_pursuit import PurePursuitController
+
 import numpy as np
 import random
 import secrets
@@ -148,12 +150,15 @@ class Vehicle:
         self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
+        self.controller = PurePursuitController()
+        self.controller.set_target_velocity(0.5)
 
         ## Session management
 
         self.sessions_lock = debuggable_lock('sessions_lock', RLock())
         self.sessions = {}
         self.session_order = []
+
 
         self.reserve_q = SimpleQueue()
 
@@ -384,32 +389,10 @@ class Vehicle:
                 active_session_id = self.session_order[0]
                 rospy.loginfo('Changing session to %s', active_session_id)
             
-            limits_mask = self.limits #  self.sessions[active_session_id]['limits']
-
-            if limits_mask is None:
-                rospy.logwarn('Missing driving limits')
+            if self.target is None:
+                rospy.logwarn('Missing target')
             else:
-                # Update control
-                if self.STATE_DIMS == 4:
-                    limits_mask &= (self.U1_GRID >= steering + self.MIN_STEER_RATE)
-                    limits_mask &= (self.U1_GRID <= steering + self.MAX_STEER_RATE)
-                    args = np.argwhere(limits_mask)
-                    if len(args) == 0:
-                        rospy.loginfo('No admissible driving limits')
-                    else:
-                        n = np.random.randint(0, len(args))
-                        i, j = args[n]
-                        steering = self.U1_VEC[i]
-                        velocity += self.U2_VEC[j] * self.DELTA_TIME
-                if self.STATE_DIMS == 5:
-                    args = np.argwhere(limits_mask)
-                    if len(args) == 0:
-                        rospy.loginfo('No admissible driving limits')
-                    else:
-                        n = np.random.randint(0, len(args))
-                        i, j = args[n]
-                        steering += self.U1_VEC[i] * self.DELTA_TIME
-                        velocity += self.U2_VEC[j] * self.DELTA_TIME
+                steering, velocity = self.controller.compute_control(self.state, self.target)
 
             rospy.loginfo(f'Steering: {steering}, Velocity: {velocity}')
             self.actuator.send_control(steering=steering, velocity=velocity)
