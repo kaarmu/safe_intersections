@@ -221,11 +221,9 @@ class Vehicle:
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
 
         def limits_tmr(event):
-            rospy.loginfo('Sending state')
-            for sid in list(self.session_order):
-                self.state.child_frame_id = sid
-                self.State.publish(self.state)
-                break # Trick to pick first one if there is one
+            sid = self.session_order[0]
+            self.state.child_frame_id = sid
+            self.State.publish(self.state)
         rospy.Timer(rospy.Duration(0.5), limits_tmr)
 
         ## Node initialized

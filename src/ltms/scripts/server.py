@@ -309,8 +309,19 @@ class Server:
         h = state_msg.yaw
         v = state_msg.v
 
-        time_ref = self.sessions[usr_id]['reservation']['time_ref']
-        pass4 = self.sessions[usr_id]['reservation']['analysis']['pass4']
+        if usr_id not in self.sessions:
+            return # not connected yet
+
+        for sess in self.select_session(usr_id):
+            if not sess['reserved']: return # not reserved so not limits avail
+            time_ref = sess['reservation']['time_ref']
+            pass4 = sess['reservation']['analysis']['pass4']    
+            break
+        else:
+            return # not connected
+        
+        rospy.loginfo('Sending Limits')
+
         state = np.array([x, y, h, 0, v])
         i = (now - time_ref).total_seconds() // self.TIME_STEP
 
