@@ -444,8 +444,8 @@ class Server:
                                      exit=self.environment[req.exit],
                                      dangers=dangers,
                                      result=result,
-                                     save_path=save_path,
-                                     interactive=True)
+                                    #  save_path=save_path,
+                                     interactive=False)
 
             earliest_entry = max(earliest_entry, result['earliest_entry'])
             latest_entry = min(latest_entry, result['latest_entry'])
