@@ -214,7 +214,7 @@ class Vehicle:
         def limits_cb(msg):
             for sess in self.select_session(msg.name):
                 rospy.logdebug('Setting new driving limits for %s', msg.name)
-                limits = np.frombuffer(msg.data, dtype=bool)
+                limits = np.frombuffer(msg.mask, dtype=bool)
                 limits = limits.reshape(self.LIMITS_SHAPE)
                 sess.update(limits=limits)
                 self.limits = limits

@@ -336,7 +336,7 @@ class Server:
             rospy.loginfo('State outside of grid for Limits: %s', usr_id)
             return # outside grid
 
-        mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
+        mask, ctrl_vecs = self.solver.lrcs(pass4, state, ceil(i))
 
         limits_msg = NamedBytes(usr_id, mask.tobytes())
         self.Limits.publish(limits_msg)
