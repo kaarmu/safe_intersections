@@ -48,6 +48,36 @@ def load_param(name, value=None):
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, value)
 
+def closest_subzero(vf, idx):
+    """
+    Find the index of the closest sub-zero element to the given index in a 5D numpy array.
+    
+    Parameters:
+    vf (np.ndarray): A 5D numpy array.
+    idx (tuple): A 5-tuple representing the index to find the closest sub-zero element to.
+    
+    Returns:
+    tuple: A 5-tuple `jdx` corresponding to the index of the closest sub-zero element.
+    """
+    # Ensure idx is a valid 5-tuple.
+    if len(idx) != len(vf.shape):
+        raise ValueError("idx must be a 5-tuple")
+    
+    # Get the indices of all sub-zero elements in `vf`.
+    subzero_indices = np.argwhere(vf < 0)
+    
+    # If there are no sub-zero elements, return None or raise an error.
+    if len(subzero_indices) == 0:
+        raise ValueError("No sub-zero elements found in the array")
+    
+    # Calculate the distance of each sub-zero index to the given index `idx`.
+    distances = np.linalg.norm(subzero_indices - np.array(idx), axis=1)
+    
+    # Find the index of the closest sub-zero element.
+    closest_idx = np.argmin(distances)
+    jdx = tuple(subzero_indices[closest_idx])
+    
+    return jdx, distances[closest_idx]
 
 def service_wrp(srv_cls, method=False):
     Req  = srv_cls._request_class
@@ -322,21 +352,28 @@ class Server:
         
 
         state = np.array([x, y, h, 0, v])
-        i = (now - time_ref).total_seconds() // self.TIME_STEP
+        i = ceil((now - time_ref).total_seconds() // self.TIME_STEP)
 
         if not 0 <= i < len(self.solver.timeline):
             rospy.loginfo('State outside of timeline for Limits: %s', usr_id)
             return # outside timeline
         
-        idx = (np.array([x, y, h]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
-        idx = np.where(self.grid._is_periodic_dim[:3], idx % np.array(self.grid.shape[:3]), idx)
+        idx = (state - self.grid.domain.lo) / np.array(self.grid.spacings)
+        idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
         idx = np.round(idx).astype(int)
 
-        if (idx < 0).any() or (self.grid.shape[:3] <= idx).any():
+        if (idx[:3] < 0).any() or (self.grid.shape[:3] <= idx[:3]).any():
             rospy.loginfo('State outside of grid for Limits: %s', usr_id)
             return # outside grid
+        
+        jdx, dist = closest_subzero(pass4[i], idx)
+        rospy.loginfo(f'{dist=}')
+        state = np.array([
+            self.solver.grid.coordinate_vectors[n][j]
+            for n, j in enumerate(jdx)
+        ])
 
-        mask, ctrl_vecs = self.solver.lrcs(pass4, state, ceil(i))
+        mask, ctrl_vecs = self.solver.lrcs(pass4[i], state, i)
 
         limits_msg = NamedBytes(usr_id, mask.tobytes())
         self.Limits.publish(limits_msg)
