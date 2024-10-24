@@ -90,7 +90,7 @@ _PERMITTED_ROUTES = {
 class Server:
 
     AVOID_MARGIN = 0.4
-    TIME_HORIZON = 15
+    TIME_HORIZON = 10
     TIME_STEP = 0.2
 
     MAX_WINDOW_ENTRY = 2
@@ -111,7 +111,7 @@ class Server:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.INFO)
 
         ## Load parameters
 
@@ -146,8 +146,8 @@ class Server:
                              dynamics=dict(cls=self.MODEL,
                                            min_steer=-pi * 5/4, 
                                            max_steer=+pi * 5/4,
-                                           min_accel=-0.5, 
-                                           max_accel=+0.5),
+                                           min_accel=-0.3, 
+                                           max_accel=+0.3),
                              interactive=False)
 
         self.environment = self.load_environment()
@@ -386,40 +386,21 @@ class Server:
                        for _id, danger in dangers.items()
                        if _id[:5] != sid[:5]]
 
-            doubt = {'pass1': self.offline_passes[req.entry, req.exit]}
-            output = self.solver.run_analysis('pass2',
-                                              min_window_entry=1,  max_window_entry=max_window_entry,
-                                              min_window_exit=1, max_window_exit=2.0,
-                                              pass1=self.offline_passes[req.entry, req.exit],
-                                              entry=self.environment[req.entry],
-                                              exit=self.environment[req.exit],
-                                              dangers=dangers,
-                                              interactive=False)
-            doubt['pass2'] = output['pass2'].copy()
-            output = self.solver.run_analysis('pass3',
-                                              min_window_entry=1,  max_window_entry=max_window_entry,
-                                              min_window_exit=1, max_window_exit=2.0,
-                                              pass1=self.offline_passes[req.entry, req.exit],
-                                              pass2=output['pass2'],
-                                              entry=self.environment[req.entry],
-                                              exit=self.environment[req.exit],
-                                              dangers=dangers,
-                                              interactive=False)
-            doubt['pass3'] = output['pass3'].copy()
-            output = self.solver.run_analysis('pass4',
-                                              min_window_entry=1,  max_window_entry=max_window_entry,
-                                              min_window_exit=1, max_window_exit=2.0,
-                                              pass1=self.offline_passes[req.entry, req.exit],
-                                              entry=self.environment[req.entry],
-                                              exit=self.environment[req.exit],
-                                              dangers=dangers,
-                                              interactive=True)
-            doubt['pass4'] = output['pass4'].copy()
+            result = {}
+            self.solver.run_analysis('pass2', 'pass3', 'pass4',
+                                     min_window_entry=1,  max_window_entry=max_window_entry,
+                                     min_window_exit=1, max_window_exit=2.0,
+                                     pass1=self.offline_passes[req.entry, req.exit],
+                                     entry=self.environment[req.entry],
+                                     exit=self.environment[req.exit],
+                                     dangers=dangers,
+                                     result=result,
+                                     interactive=True)
 
-            earliest_entry = max(earliest_entry, output['earliest_entry'])
-            latest_entry = min(latest_entry, output['latest_entry'])
-            earliest_exit = output['earliest_exit']
-            latest_exit = output['latest_exit']
+            earliest_entry = max(earliest_entry, result['earliest_entry'])
+            latest_entry = min(latest_entry, result['latest_entry'])
+            earliest_exit = result['earliest_exit']
+            latest_exit = result['latest_exit']
             assert 0 < latest_entry - earliest_entry, 'Negotiation Faild: No time window to enter region'
 
         except AssertionError as e:
@@ -435,9 +416,9 @@ class Server:
                                  latest_entry=latest_entry,
                                  earliest_exit=earliest_exit,
                                  latest_exit=latest_exit,
-                                 analysis=output)
+                                 analysis=result)
             
-            # flat_corridor = shp.project_onto(output['pass4'], 1, 2) <= 0
+            # flat_corridor = shp.project_onto(result['pass4'], 1, 2) <= 0
 
             resp.time_ref = time_ref.isoformat()
             resp.earliest_entry = earliest_entry
@@ -451,11 +432,11 @@ class Server:
 
         ## DEBUG
         finally:
-            if not output: return
+            if not result: return
 
             for p in 'pass1 pass2 pass3 pass4'.split():
-                if p in doubt:
-                    np.save(f'/svea_ws/src/ltms/data/{sid}-{p}.npy', doubt[p], allow_pickle=True)
+                if p in result:
+                    np.save(f'/svea_ws/src/ltms/data/{sid}-{p}.npy', result[p], allow_pickle=True)
             
             # with open(f'/svea_ws/src/ltms/data/{sid}.json', 'w') as f:
             #     json.dump({
@@ -464,10 +445,10 @@ class Server:
             #         'latest_entry': latest_entry,
             #         'earliest_exit': earliest_exit,
             #         'latest_exit': latest_exit,
-            #         'output_earliest_entry': output['earliest_entry'],
-            #         'output_latest_entry': output['latest_entry'],
-            #         'output_earliest_exit': output['earliest_exit'],
-            #         'output_latest_exit': output['latest_exit'],
+            #         'output_earliest_entry': result['earliest_entry'],
+            #         'output_latest_entry': result['latest_entry'],
+            #         'output_earliest_exit': result['earliest_exit'],
+            #         'output_latest_exit': result['latest_exit'],
             #     }, f)
         
     def resolve_dangers(self, time_ref, quiet=False):

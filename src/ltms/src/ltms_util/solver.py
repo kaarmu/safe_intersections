@@ -311,6 +311,7 @@ class Solver:
         max_window_entry = kwargs.pop('max_window_entry', max_window)
         min_window_exit = kwargs.pop('min_window_exit', min_window)
         max_window_exit = kwargs.pop('max_window_exit', max_window)
+        result = kwargs.pop('result', {})
 
         ALL_PASSES = ['pass1', 'pass2', 'pass3', 'pass4']
         passes = passes or ALL_PASSES
@@ -319,7 +320,6 @@ class Solver:
         passes = [name for name in ALL_PASSES if name in passes]
 
         passes_out = ALL_PASSES if debug else list(passes)
-        out = {}
 
         for name in passes:
             assert name in ALL_PASSES, f'Invalid pass: {name}'
@@ -329,11 +329,11 @@ class Solver:
                 passes += [ALL_PASSES[i-1]]
         passes_sch = [name for name in ALL_PASSES if name in passes]
 
-        msg = 'Running analysis with the following passes: '
-        msg += ', '.join(passes_sch) + '\n'
-        underline = '-' * (len(msg)-1)
-
         if interactive:
+            msg = 'Running analysis with the following passes:\n'
+            msg += '  Scheduled: ' + ', '.join(passes_sch) + '\n'
+            msg += '  resulting: ' + ', '.join(passes_out) + '\n'
+            underline = '-' * max(map(len, msg.split('\n')))
             print(msg + underline, end='\n\n')
 
         def to_shared(values, **kwargs):
@@ -352,23 +352,22 @@ class Solver:
             constraints = rules
 
             start_time = time()
-            output = self.brs(self.timeline, target, constraints, interactive=interactive)
+            vf = self.brs(self.timeline, target, constraints, interactive=interactive)
             stop_time = time()
             comp_time = stop_time - start_time
 
             if interactive:
-                print(f'Compute Time: {comp_time:.02f}')
-                print(end='\n')
+                print(f'  Compute Time: {comp_time:.02f}')
             
-            kwargs['pass1'] = output
+            kwargs['pass1'] = vf
 
-            out['comp_time_pass1'] = comp_time
-            if 'pass1' in passes_out: out['pass1'] = output.copy()
+            result['comp_time_pass1'] = comp_time
+            if 'pass1' in passes_out: result['pass1'] = vf.copy()
 
         if 'pass2' in passes_sch:
             if interactive: print('Pass 2: Avoidance')
             
-            output = kwargs['pass1']
+            vf = kwargs['pass1']
             avoid = kwargs['dangers']
             end = kwargs['exit']
             comp_time = 0
@@ -378,41 +377,40 @@ class Solver:
                     *map(lambda target: to_shared(target, keepdims=True), avoid),
                 ) - self.AVOID_MARGIN # increase avoid set with heuristic margin
 
-                interact_window = when_overlapping(output, avoid_target)
+                interact_window = when_overlapping(vf, avoid_target)
                 if 0 < interact_window.size:
                     i, j = interact_window[0], interact_window[-1] + 1
 
                     # Recompute solution until after last interaction
-                    constraints = shp.setminus(output, avoid_target)[:j+1]
-                    target = output[:j+1]    # last step is target to reach pass1
+                    constraints = shp.setminus(vf, avoid_target)[:j+1]
+                    target = vf[:j+1]    # last step is target to reach pass1
                     target[:-1] = end       # all other steps are recomputed to end
                     
                     start_time = time()
-                    output[:j+1] = self.brs(self.timeline[:j+1], target, constraints, interactive=interactive)
+                    vf[:j+1] = self.brs(self.timeline[:j+1], target, constraints, interactive=interactive)
                     stop_time = time()
                     comp_time = stop_time - start_time
                 
                     if interactive:
-                        print(f'First Interaction: {self.timeline[i]:.01f}')
-                        print(f'Last Interaction: {self.timeline[j-1]:.01f}')
-                        print(f'Compute Time: {comp_time:.02f}')
-                        print(end='\n')
+                        print(f'  First Interaction: {self.timeline[i]:.01f}')
+                        print(f'  Last Interaction: {self.timeline[j-1]:.01f}')
+                        print(f'  Compute Time: {comp_time:.02f}')
 
-            kwargs['pass2'] = output
+            kwargs['pass2'] = vf
 
-            out['comp_time_pass2'] = comp_time
-            if 'pass2' in passes_out: out['pass2'] = output.copy()
+            result['comp_time_pass2'] = comp_time
+            if 'pass2' in passes_out: result['pass2'] = vf.copy()
 
         if 'pass3' in passes_sch:
             if interactive: print('Pass 3: Planning, Entry')
             
-            output = kwargs['pass2']
+            vf = kwargs['pass2']
             start = kwargs['entry']
             comp_time = 0
 
             min_nsteps = ceil(min_window_entry / self.time_step)
             max_nsteps = ceil(max_window_entry / self.time_step)
-            depart_target = shp.intersection(output, start)
+            depart_target = shp.intersection(vf, start)
             depart_window = earliest_window(shp.project_onto(depart_target, 0) <= 0, min_nsteps)
             assert depart_window.size > 0, 'Analysis Failed: No time window to enter region'
             w0 = 0
@@ -422,40 +420,39 @@ class Solver:
             depart_target[j:] = 1
 
             start_time = time()
-            output[i:] = self.frs(self.timeline[i:], depart_target[i:], output[i:], interactive=interactive)
-            output[:i] = 1 # Remove all values before departure
+            vf[i:] = self.frs(self.timeline[i:], depart_target[i:], vf[i:], interactive=interactive)
+            vf[:i] = 1 # Remove all values before departure
             stop_time = time()
             comp_time = stop_time - start_time
 
             if interactive:
-                print(f'Earliest Entry: {self.timeline[i]:.01f}')
-                print(f'Latest Entry: {self.timeline[j-1]:.01f}')
-                print(f'Compute Time: {comp_time:.02f}')
-                print(end='\n')
+                print(f'  Earliest Entry: {self.timeline[i]:.01f}')
+                print(f'  Latest Entry: {self.timeline[j-1]:.01f}')
+                print(f'  Compute Time: {comp_time:.02f}')
 
-            kwargs['pass3'] = output
+            kwargs['pass3'] = vf
             
-            out['comp_time_pass3'] = comp_time
-            out['earliest_entry'] = self.timeline[i]
-            out['latest_entry'] = self.timeline[j-1]
-            if 'pass3' in passes_out: out['pass3'] = output.copy()
+            result['comp_time_pass3'] = comp_time
+            result['earliest_entry'] = self.timeline[i]
+            result['latest_entry'] = self.timeline[j-1]
+            if 'pass3' in passes_out: result['pass3'] = vf.copy()
 
-            if debug: out['entry_target'] = depart_target
+            if debug: result['entry_target'] = depart_target
 
         if 'pass4' in passes_sch:
             if interactive: print('Pass 4: Planning, Exit')
             
-            output = kwargs['pass3']
+            vf = kwargs['pass3']
             end = kwargs['exit']
             comp_time = 0
 
             min_nsteps = ceil(min_window_exit / self.time_step)
             max_nsteps = ceil(max_window_exit / self.time_step)
-            arrival_target = shp.intersection(output, end)
-            mask = shp.project_onto(arrival_target, 0) <= 0
-            # mask[:j+10] = 0 # False
-            arrival_window = earliest_window(mask, min_nsteps)
-            print(mask, arrival_window,  j)
+            arrival_target = shp.intersection(vf, end)
+            arrival_target_times = shp.project_onto(arrival_target, 0, 1, 2)
+            arrival_target_times = shp.project_onto(arrival_target_times, 0, union=False)
+            arrival_window = earliest_window(arrival_target_times <= 0, min_nsteps)
+            print(arrival_target_times <= 0, arrival_window,  j)
             assert arrival_window.size > 0, 'Analysis Failed: No time window to exit region'
             w0 = 0
             wn = min(max_nsteps+1, len(arrival_window)-1)
@@ -464,25 +461,24 @@ class Solver:
             arrival_target[n:] = 1
 
             start_time = time()
-            output[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], output[i:n], interactive=interactive)
-            output[n:] = 1 # Remove all values after arrival
+            vf[i:n] = self.brs(self.timeline[i:n], arrival_target[i:n], vf[i:n], interactive=interactive)
+            vf[n:] = 1 # Remove all values after arrival
             stop_time = time()
             comp_time = stop_time - start_time
 
             if interactive:
-                print(f'Earliest Exit: {self.timeline[m]:.01f}')
-                print(f'Latest Exit: {self.timeline[n-1]:.01f}')
-                print(f'Compute Time: {comp_time:.02f}')
-                print(end='\n')
+                print(f'  Earliest Exit: {self.timeline[m]:.01f}')
+                print(f'  Latest Exit: {self.timeline[n-1]:.01f}')
+                print(f'  Compute Time: {comp_time:.02f}')
 
-            kwargs['pass4'] = output
+            kwargs['pass4'] = vf
 
-            out['comp_time_pass4'] = comp_time
-            out['earliest_exit'] = self.timeline[m]
-            out['latest_exit'] = self.timeline[n-1]
-            if 'pass4' in passes_out: out['pass4'] = output.copy()
+            result['comp_time_pass4'] = comp_time
+            result['earliest_exit'] = self.timeline[m]
+            result['latest_exit'] = self.timeline[n-1]
+            if 'pass4' in passes_out: result['pass4'] = vf.copy()
 
-            if debug: out['exit_target'] = arrival_target
+            if debug: result['exit_target'] = arrival_target
 
         stop_time_all = time()
         comp_time = stop_time_all - start_time_all
@@ -491,9 +487,9 @@ class Solver:
             print(f'Total Compute Time: {comp_time:.02f}')
             print(underline, end='\n\n')
 
-        out['comp_time'] = comp_time
+        result['comp_time'] = comp_time
 
-        return out
+        return result
 
     def run_many(self, *objectives, **kwargs):
         interactive = kwargs.get('interactive', self.is_interactive)
