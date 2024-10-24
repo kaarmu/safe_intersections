@@ -370,7 +370,7 @@ class Server:
             for n, j in enumerate(jdx)
         ])
 
-        limits_msg = NamedBytes(usr_id, state.tobytes())
+        limits_msg = NamedBytes(usr_id, list(state.tobytes()))
         self.Limits.publish(limits_msg)
         rospy.loginfo('Sending Limits')
 
