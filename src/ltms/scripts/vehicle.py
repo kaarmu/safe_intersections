@@ -210,12 +210,14 @@ class Vehicle:
         self.notify_srv = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
         self.reserve_srv = self.nats_mgr.new_serviceproxy('/server/reserve', Reserve)
         
+        self.limits = None
         def limits_cb(msg):
             for sess in self.select_session(msg.name):
                 rospy.logdebug('Setting new driving limits for %s', msg.name)
                 limits = np.frombuffer(msg.data, dtype=bool)
                 limits = limits.reshape(self.LIMITS_SHAPE)
                 sess.update(limits=limits)
+                self.limits = limits
 
         self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
@@ -386,7 +388,7 @@ class Vehicle:
                 active_session_id = self.session_order[0]
                 rospy.loginfo('Changing session to %s', active_session_id)
             
-            limits_mask = self.sessions[active_session_id]['limits']
+            limits_mask = self.limits #  self.sessions[active_session_id]['limits']
 
             if limits_mask is None:
                 rospy.logwarn('Missing driving limits')
