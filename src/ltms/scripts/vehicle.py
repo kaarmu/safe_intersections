@@ -145,7 +145,7 @@ class Vehicle:
         self.INIT_WAIT = load_param('~init_wait', 15)
         self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
 
-        self.RES_TIME_LIMIT = load_param('~res_time_limit', 15)
+        self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
 
@@ -294,7 +294,7 @@ class Vehicle:
                         self.reserve_q.put(sess)
                         skip = True # just put the first non-reserved on queue
 
-                    else:
+                    elif not sess['reserved']:
                         # Justify arrival time and notify server
                         resp = self.notify_srv(sid, adjusted_arrival_time.isoformat())
                         sess['arrival_time'] = adjusted_arrival_time
@@ -379,7 +379,7 @@ class Vehicle:
 
         while not rospy.is_shutdown():
 
-            # Maybe will cause data race in sessions_update 
+            # NOTE: Maybe will cause data race in sessions_update 
             if self.sessions[active_session_id]['departure_time'] <= datetime.now():
                 self.session_order = self.session_order[1:]
                 active_session_id = self.session_order[0]

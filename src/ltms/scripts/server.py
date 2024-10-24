@@ -96,8 +96,8 @@ class Server:
     MAX_WINDOW_ENTRY = 2
 
     SESSION_TIMEOUT = timedelta(seconds=30)
-    TRANSIT_TIME = 5 # [s] made up, roughly accurate
-    COMPUTE_TIME = 5 # [s] made up, roughly accurate
+    TRANSIT_TIME = 15 # [s] made up, roughly accurate
+    COMPUTE_TIME = 10 # [s] made up, roughly accurate
 
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
