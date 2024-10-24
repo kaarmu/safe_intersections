@@ -362,7 +362,8 @@ class Server:
         idx = np.where(self.grid._is_periodic_dim[:2], idx % np.array(self.grid.shape[:2]), idx)
         idx = np.round(idx).astype(int)
 
-        jdx, dist = closest_subzero(pass4[i], idx)
+        vf = shp.project_onto(pass4[i+3], 0, 1)
+        jdx, dist = closest_subzero(vf, idx)
         rospy.loginfo(f'{dist=}')
         state = np.array([
             self.solver.grid.coordinate_vectors[n][j]
