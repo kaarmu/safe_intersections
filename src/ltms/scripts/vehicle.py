@@ -218,7 +218,7 @@ class Vehicle:
         self.target = None
         def limits_cb(msg):
             rospy.logdebug('Setting new driving limits for %s', msg.name)
-            self.target = np.frombuffer(bytes(msg.mask), dtype=bool)
+            self.target = (msg.x, msg.y)
 
         self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
