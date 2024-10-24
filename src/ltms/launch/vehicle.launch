@@ -12,6 +12,9 @@
 
     <arg name="use_foxglove"    default="false"/>
 
+    <!-- Start Mocap -->
+    <include file="$(find svea_mocap)/launch/mocap_only.launch"/>
+
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
         <arg name="port" value="8765" />
