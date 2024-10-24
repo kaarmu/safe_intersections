@@ -135,7 +135,7 @@ class Vehicle:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.INFO)
 
         ## Load parameters
 
