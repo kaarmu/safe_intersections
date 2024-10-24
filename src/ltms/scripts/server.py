@@ -320,25 +320,27 @@ class Server:
         else:
             return # not connected
         
-        rospy.loginfo('Sending Limits')
 
         state = np.array([x, y, h, 0, v])
         i = (now - time_ref).total_seconds() // self.TIME_STEP
 
         if not 0 <= i < len(self.solver.timeline):
+            rospy.loginfo('State outside of timeline for Limits: %s', usr_id)
             return # outside timeline
         
         idx = (np.array([x, y, h]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
-        idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
+        idx = np.where(self.grid._is_periodic_dim[:3], idx % np.array(self.grid.shape[:3]), idx)
         idx = np.round(idx).astype(int)
 
         if (idx < 0).any() or (self.grid.shape[:3] <= idx).any():
+            rospy.loginfo('State outside of grid for Limits: %s', usr_id)
             return # outside grid
 
         mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
 
         limits_msg = NamedBytes(usr_id, mask.tobytes())
         self.Limits.publish(limits_msg)
+        rospy.loginfo('Sending Limits')
 
     @service_wrp(Reserve, method=True)
     def reserve_srv(self, req, resp):
