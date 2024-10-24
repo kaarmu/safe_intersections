@@ -142,10 +142,10 @@ class Vehicle:
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
 
-        self.INIT_WAIT = load_param('~init_wait', 15)
+        self.INIT_WAIT = load_param('~init_wait', 30)
         self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
 
-        self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
+        self.RES_TIME_LIMIT = load_param('~res_time_limit', 20)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
 
