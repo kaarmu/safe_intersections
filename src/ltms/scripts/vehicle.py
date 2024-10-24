@@ -398,16 +398,22 @@ class Vehicle:
                     limits_mask &= (self.U1_GRID >= steering + self.MIN_STEER_RATE)
                     limits_mask &= (self.U1_GRID <= steering + self.MAX_STEER_RATE)
                     args = np.argwhere(limits_mask)
-                    n = np.random.randint(0, len(args))
-                    i, j = args[n]
-                    steering = self.U1_VEC[i]
-                    velocity += self.U2_VEC[j] * self.DELTA_TIME
+                    if len(args) == 0:
+                        rospy.loginfo('No admissible driving limits')
+                    else:
+                        n = np.random.randint(0, len(args))
+                        i, j = args[n]
+                        steering = self.U1_VEC[i]
+                        velocity += self.U2_VEC[j] * self.DELTA_TIME
                 if self.STATE_DIMS == 5:
                     args = np.argwhere(limits_mask)
-                    n = np.random.randint(0, len(args))
-                    i, j = args[n]
-                    steering += self.U1_VEC[i] * self.DELTA_TIME
-                    velocity += self.U2_VEC[j] * self.DELTA_TIME
+                    if len(args) == 0:
+                        rospy.loginfo('No admissible driving limits')
+                    else:
+                        n = np.random.randint(0, len(args))
+                        i, j = args[n]
+                        steering += self.U1_VEC[i] * self.DELTA_TIME
+                        velocity += self.U2_VEC[j] * self.DELTA_TIME
 
             rospy.loginfo(f'Steering: {steering}, Velocity: {velocity}')
             self.actuator.send_control(steering=steering, velocity=velocity)
