@@ -214,7 +214,6 @@ class Vehicle:
         def limits_cb(msg):
             for sess in self.select_session(msg.name):
                 rospy.logdebug('Setting new driving limits for %s', msg.name)
-                print(type(msg.mask), msg.mask[:4], '...')
                 limits = np.frombuffer(bytes(msg.mask), dtype=bool)
                 limits = limits.reshape(self.LIMITS_SHAPE)
                 sess.update(limits=limits)
@@ -398,11 +397,15 @@ class Vehicle:
                 if self.STATE_DIMS == 4:
                     limits_mask &= (self.U1_GRID >= steering + self.MIN_STEER_RATE)
                     limits_mask &= (self.U1_GRID <= steering + self.MAX_STEER_RATE)
-                    i, j = np.random.choice(np.argwhere(limits_mask))
+                    args = np.argwhere(limits_mask)
+                    n = np.random.randint(0, len(args))
+                    i, j = args[n]
                     steering = self.U1_VEC[i]
                     velocity += self.U2_VEC[j] * self.DELTA_TIME
                 if self.STATE_DIMS == 5:
-                    i, j = np.random.choice(np.argwhere(limits_mask))
+                    args = np.argwhere(limits_mask)
+                    n = np.random.randint(0, len(args))
+                    i, j = args[n]
                     steering += self.U1_VEC[i] * self.DELTA_TIME
                     velocity += self.U2_VEC[j] * self.DELTA_TIME
 
