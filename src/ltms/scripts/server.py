@@ -350,22 +350,18 @@ class Server:
         else:
             return # not connected
         
-
-        state = np.array([x, y, h, 0, v])
+        lookahead = np.array([x + 0.3*np.cos(h), y + 0.3*np.sin(h)])
         i = ceil((now - time_ref).total_seconds() // self.TIME_STEP)
+        i = min(i + 5, len(self.solver.timeline) - 1)
 
         if not 0 <= i < len(self.solver.timeline):
             rospy.loginfo('State outside of timeline for Limits: %s', usr_id)
             return # outside timeline
         
-        idx = (state - self.grid.domain.lo) / np.array(self.grid.spacings)
-        idx = np.where(self.grid._is_periodic_dim, idx % np.array(self.grid.shape), idx)
+        idx = (lookahead - self.grid.domain.lo[:2]) / np.array(self.grid.spacings[:2])
+        idx = np.where(self.grid._is_periodic_dim[:2], idx % np.array(self.grid.shape[:2]), idx)
         idx = np.round(idx).astype(int)
 
-        if (idx[:3] < 0).any() or (self.grid.shape[:3] <= idx[:3]).any():
-            rospy.loginfo('State outside of grid for Limits: %s', usr_id)
-            return # outside grid
-        
         jdx, dist = closest_subzero(pass4[i], idx)
         rospy.loginfo(f'{dist=}')
         state = np.array([
@@ -373,9 +369,7 @@ class Server:
             for n, j in enumerate(jdx)
         ])
 
-        mask, ctrl_vecs = self.solver.lrcs(pass4, state, i)
-
-        limits_msg = NamedBytes(usr_id, mask.tobytes())
+        limits_msg = NamedBytes(usr_id, state.tobytes())
         self.Limits.publish(limits_msg)
         rospy.loginfo('Sending Limits')
 
