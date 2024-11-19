@@ -362,14 +362,15 @@ class Server:
         idx = np.where(self.grid._is_periodic_dim[:2], idx % np.array(self.grid.shape[:2]), idx)
         idx = np.round(idx).astype(int)
 
-        jdx, dist = closest_subzero(pass4[i], idx)
+        vf = shp.project_onto(pass4, 1, 2)
+        jdx, dist = closest_subzero(vf, idx)
         rospy.loginfo(f'{dist=}')
         state = np.array([
             self.solver.grid.coordinate_vectors[n][j]
             for n, j in enumerate(jdx)
         ])
 
-        limits_msg = NamedBytes(usr_id, state.tobytes())
+        limits_msg = NamedBytes(usr_id, state[0], state[1])
         self.Limits.publish(limits_msg)
         rospy.loginfo('Sending Limits')
 
@@ -445,7 +446,7 @@ class Server:
                                      dangers=dangers,
                                      result=result,
                                      save_path=save_path,
-                                     interactive=True)
+                                     interactive=False)
 
             earliest_entry = max(earliest_entry, result['earliest_entry'])
             latest_entry = min(latest_entry, result['latest_entry'])

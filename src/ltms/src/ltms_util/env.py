@@ -43,10 +43,30 @@ def create_chaos(grid, *envs):
 
     H_MARGIN = 2*pi/16
 
+    ## Slip prevention
+    # max allowed delta = dmax - ((dmax - dmin)/vmax)vel
+    # 0 = (-delta) + (dmax - ((dmax - dmin)/vmax)vel)
+    # 0 = (-delta) + -(((dmax - dmin)/vmax)vel - dmax)
+    # k := ((dmax - dmin)/vmax)
+    # 0 = (-delta) + -k(vel - dmax/k)
+    # 0 = delta + k(vel - dmax/k) # for fixed vel, less delta is good => eq. should be negative
+    VMAX, DMAX, DMIN = 1.0, pi/5, pi/20
+    k = ((DMAX - DMIN)/VMAX)
+    slip_prevention = shp.hyperplane(grid,
+                                     axes=[D, V],
+                                     normal=[1, k],
+                                     offset=[0, DMAX/k])
+
+    speedlimit = shp.rectangle(grid, axes=V, target_min=0.0, target_max=0.6)
+
     if 'center' in envs_sch:
-        out['center'] = shp.rectangle(grid, axes=[X, Y],
-                                      target_min=[X0 + (0.5-0.05)*XN, Y0 + (0.5-0.05)*YN],
-                                      target_max=[X0 + (0.5+0.05)*XN, Y0 + (0.5+0.05)*YN])
+        out['center'] = shp.intersection(
+            shp.rectangle(grid, axes=[X, Y],
+                          target_min=[X0 + (0.5-0.05)*XN, Y0 + (0.5-0.05)*YN],
+                          target_max=[X0 + (0.5+0.05)*XN, Y0 + (0.5+0.05)*YN]),
+            speedlimit,
+            slip_prevention,
+        )
 
     if 'center_w' in envs_sch:
         out['center_w'] = shp.intersection(
@@ -166,10 +186,8 @@ def create_chaos(grid, *envs):
                                     target_min=[X0, Y0],
                                     target_max=[X0 + 0.5, Y0 + 0.6])
     if 'full' in envs_sch:
-        out['full'] = shp.rectangle(grid, axes=[V],
-                                    target_min=[0.3],
-                                    target_max=[0.6])
-
+        out['full'] = shp.intersection(speedlimit, slip_prevention)
+                      
     if 'left' in envs_sch:
         out['left'] =   shp.rectangle(grid, axes=[X, Y, H],
                                       target_min=[X0 + (0.1-0.1)*XN, Y0 + (0.5-0.05)*YN, H_N - H_MARGIN],
