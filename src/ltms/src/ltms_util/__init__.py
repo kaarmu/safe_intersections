@@ -1,15 +1,17 @@
+import sys
 from math import ceil
 from time import time, sleep
 
-import hj_reachability as hj
+if sys.version_info.minor >= 9:
+    
+    import hj_reachability as hj
 
-from .rc import RC
-from .env import create_4way, create_chaos
-from .solver import *
+    from .rc import RC
+    from .env import create_4way, create_chaos
+    from .solver import *
 
-from .bob import Bob
+    from .bob import Bob
 
-import sys
 if sys.version_info.minor >= 10:
 
     from .plotting import *
