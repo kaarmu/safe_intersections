@@ -1,4 +1,5 @@
 string usr_id
 string arrival_time # roughly when we get to the region
 ---
+string latest_reserve_time
 float32 transit_time

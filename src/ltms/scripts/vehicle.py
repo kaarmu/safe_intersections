@@ -17,6 +17,7 @@ from svea_msgs.msg import VehicleState as VehicleStateMsg
 import rospy
 from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
+from ltms_util.debuggable_lock import *
 import message_filters as mf
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Path
@@ -28,16 +29,6 @@ from contextlib import contextmanager
 import tf2_ros
 import tf2_geometry_msgs
 from tf import transformations 
-
-def debuggable_lock(name, lock):
-    @contextmanager
-    def ctx(caller):
-        rospy.logdebug('%s: %s acquiring', caller, name)
-        with lock:
-            rospy.logdebug('%s: %s acquired', caller, name)
-            yield
-        rospy.logdebug('%s: %s released', caller, name)
-    return ctx
 
 def state_to_pose(state):
     pose = PoseStamped()
@@ -135,7 +126,7 @@ class Vehicle:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__, log_level=rospy.INFO)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
 
         ## Load parameters
 
@@ -147,7 +138,6 @@ class Vehicle:
 
         self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
-
 
         ## Session management
 
@@ -162,8 +152,8 @@ class Vehicle:
                 sess = self.reserve_q.get()
                 with sess['lock']('reserve worker'):
                     if sess['reserved']: return # just double check
-                    success = self.reserve(sess)
-                    if not success:
+                    info = self.reserve(sess)
+                    if not info['success']:
                         # Justify arrival time and notify server
                         arrival_time = sess['arrival_time'] + timedelta(seconds=1)
                         resp = self.notify_srv(sess['sid'], arrival_time.isoformat())
@@ -213,8 +203,13 @@ class Vehicle:
         self.target = None
         def limits_cb(msg):
             for sess in self.select_session(msg.name):
-                rospy.logdebug('Setting new driving limits for %s, %s s late', msg.name, (rospy.time.now() - msg.stamp).to_sec())
-                sess['limits'] = np.frombuffer(bytes(msg.mask), dtype=bool)
+                rospy.logdebug('\n'.join([
+                    f'Received new driving limits.',
+                    f'  name: {msg.name}',
+                    f'  delta: {(rospy.Time.now() - msg.stamp).to_sec()} s',
+                ]))
+                limits = np.frombuffer(bytes([x+128 for x in msg.mask]), dtype=bool)
+                sess['limits'] = limits.reshape(len(self.U1_VEC), len(self.U2_VEC))
 
         self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
@@ -323,10 +318,11 @@ class Vehicle:
     def reserve(self, sess):
         # Assumes sess is already locked by caller
         rospy.logdebug('Reserving for %s', sess['sid'])
+        start_time = datetime.now()
 
         if sess['reserved']: 
             rospy.logdebug('> Already reserved!', sess['sid'])
-            return True
+            return {'success': True}
 
         resp = self.reserve_srv(name=sess['sid'],
                                 entry=sess['entry_loc'],
@@ -337,9 +333,9 @@ class Vehicle:
     
         if not resp.success:
             rospy.loginfo('Reservation for %s failed: %s', sess['sid'], resp.reason)
-            return False
+            return {'success': False}
         
-        rospy.logdebug(f'> Reservation succeeded!')
+        rospy.logdebug(f'> Reservation succeeded! Took: {datetime.now() - start_time}')
 
         sess['time_ref'] = datetime.fromisoformat(resp.time_ref)
         sess['earliest_entry'] = resp.earliest_entry
@@ -352,7 +348,7 @@ class Vehicle:
         sess['reserved'] = True
 
         rospy.logdebug('> Reservation complete for %s', sess['sid'])
-        return True
+        return {'success': True}
 
     def run(self):
 
@@ -385,7 +381,7 @@ class Vehicle:
                 active_session_id = self.session_order[0]
                 rospy.loginfo('Changing session to %s', active_session_id)
             
-            limits_mask = self.limits #  self.sessions[active_session_id]['limits']
+            limits_mask = self.sessions[active_session_id]['limits']
 
             if limits_mask is None:
                 rospy.logwarn('Missing driving limits')
