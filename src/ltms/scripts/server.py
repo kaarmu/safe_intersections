@@ -279,9 +279,18 @@ class Server:
         arrival_time = datetime.fromisoformat(req.arrival_time)
         session_timeout = arrival_time + self.SESSION_TIMEOUT
 
+        latest_reserve_time = self.latest_reserve_time(usr_id, arrival_time)
+        now = datetime.now()
+
+        if latest_reserve_time < now:
+            rospy.loginfo(f'Invalid connection request from {usr_id}: Earlier than HPV.')
+            resp.transit_time = -1000
+            return
+
         rospy.logdebug(f'# timeout at {session_timeout}')
 
         self.sessions_add(usr_id,
+                          latest_reserve_time=latest_reserve_time,
                           arrival_time=arrival_time,
                           session_timeout=session_timeout,
                           reserved=False,
@@ -289,6 +298,7 @@ class Server:
 
         resp.its_id = its_id
         resp.transit_time = self.TRANSIT_TIME
+        resp.latest_reserve_time = latest_reserve_time.isoformat()
 
         rospy.logdebug(f'# session added, {resp.its_id=}')
 
@@ -309,6 +319,7 @@ class Server:
                 resp.transit_time = -2000
                 return # don't update
             else:
+                sess['latest_reserve_time'] = latest_reserve_time
                 sess['arrival_time'] = arrival_time
                 sess['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
                 break # update ok

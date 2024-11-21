@@ -2,4 +2,5 @@ string usr_id
 string arrival_time
 ---
 string its_id
+string latest_reserve_time
 int32 transit_time
