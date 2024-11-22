@@ -83,8 +83,7 @@ _PERMITTED_ROUTES = {
 
 class Vehicle:
     
-    NUM_SESSIONS = 5
-    MAX_SESSIONS = 50
+    NUM_SESSIONS_AHEAD = 4
 
     DELTA_TIME = 0.1
     LOOP_TIME = 5.0
@@ -114,7 +113,7 @@ class Vehicle:
     LOCATIONS = _LOCATIONS + ['full']
     PERMITTED_ROUTES = dict(list(_PERMITTED_ROUTES.items()) + [
         (('init', _exit), ('full',))
-        for _exit in 'left'.split()
+        for _exit in 'bottom'.split()
     ])
 
     
@@ -133,7 +132,7 @@ class Vehicle:
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
 
-        self.INIT_WAIT = load_param('~init_wait', 20)
+        self.INIT_WAIT = load_param('~init_wait', 25)
         self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
 
         self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
@@ -143,28 +142,54 @@ class Vehicle:
 
         self.sessions_lock = debuggable_lock('sessions_lock', RLock())
         self.sessions = {}
+        
+        self.active_sid = None
         self.session_order = []
 
-        self.reserve_q = SimpleQueue()
+        def cleaner_tmr(event):
+            iter_opts = dict(name='cleaner',
+                             skip=(self.active_sid, *self.session_order),
+                             order=False,
+                             lock_all=True)
+            for sid in self.iter_sessions(**iter_opts):
+                del self.sessions[sid]
+                self.reserved -= {sid} # remove if it is reserved
+        rospy.Timer(rospy.Duration(10), cleaner_tmr)
 
-        def worker():
-            while not rospy.is_shutdown():
-                sid = self.reserve_q.get()
-                for sess in self.select_session(sid):
-                    if sess['reserved']: return # just double check
-                    info = self.reserve(sess)
-                    if not info['success']:
-                        # Justify arrival time and notify server
-                        arrival_time = sess['arrival_time'] + timedelta(seconds=1)
-                        resp = self.notify_srv(sess['sid'], arrival_time.isoformat())
-                        sess['arrival_time'] = arrival_time
-                        sess['departure_time'] = arrival_time + timedelta(seconds=resp.transit_time)
-                else:
-                    # session that is marked-for-reservation were cleaned up
-                    assert False, 'Undefined Behavior'
+        self.reserved = set()
+        self.reserving_sid = None
 
+        def reserver():
+            iter_opts = dict(name='reserver',
+                             skip=self.reserved, 
+                             order=True, 
+                             lock_all=False)
+                    
+            for sid, sess in self.iter_sessions(**iter_opts):
+                now = datetime.utcnow()
+                if sess['latest_reserve_time'] - now <= self.RES_TIME_LIMIT:
 
-        Thread(target=worker).start()
+                    self.reserving_sid = sid
+
+                    success = False
+                    while not success:
+                        if rospy.is_shutdown(): return
+
+                        success = self.reserve(sid)
+                        if success:
+                            self.reserved |= {sid} # add as reserved
+                            return
+                        else:
+                            rospy.logwarn('\n'.join([
+                                'Reservation unsuccessful!',
+                                f'  Name:       {sid}',
+                                f'  Time now:   {datetime.utcnow()}',
+                            ]))
+                            assert False, "Don't know what to do here yet"
+
+                    self.reserving_sid = None
+
+        rospy.Timer(rospy.Duration(1), lambda event: reserver())
 
         ## Rate
         
@@ -205,7 +230,7 @@ class Vehicle:
         
         self.target = None
         def limits_cb(msg):
-            for sess in self.select_session(msg.name):
+            for sess in self.select_session(msg.name, lock_all=False, name='limits_cb'):
                 rospy.logdebug('\n'.join([
                     f'Received new driving limits.',
                     f'  name: {msg.name}',
@@ -218,10 +243,10 @@ class Vehicle:
         self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
 
         def limits_tmr(event):
-            sid = self.session_order[0]
-            self.state.child_frame_id = sid
-            self.State.publish(self.state)
-        rospy.Timer(rospy.Duration(0.5), limits_tmr)
+            if self.active_sid is not None:
+                self.state.child_frame_id = self.active_sid
+                self.State.publish(self.state)
+        rospy.Timer(rospy.Duration(0.1), limits_tmr)
 
         ## Node initialized
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
@@ -230,181 +255,263 @@ class Vehicle:
         permitted_exits = [exit for exit in self.EXIT_LOCATIONS if (entry, exit) in self.PERMITTED_ROUTES]
         return np.random.choice(permitted_exits)
 
-    @property
-    def iter_sessions(self):
-        with self.sessions_lock('iter_sessions'):
-            for sid, sess in self.sessions.items():
-                with sess['lock']('iter_sessions'):
+    def iter_sessions(self, *, order=False, lock_all=False, skip=(), name=''):
+        if name: name += ':'
+        name += 'iter_sessions'
+
+        def iteration(items):
+            for sid, sess in items:
+                if sid in skip: continue
+                with sess['lock'](name):
                     yield (sid, sess)
+            
+        if lock_all:
+            with self.sessions_lock(name):
+                if order:
+                    items = [(sid, self.sessions[sid]) 
+                             for sid in self.session_order]
+                else:
+                    items = list(self.sessions.items())
+                yield from iteration(items)
+        else:
+            with self.sessions_lock(name):
+                items = list(self.sessions.items())
+            yield from iteration(items)
+
 
     def sessions_add(self, key, dict1=None, **kwds):
         assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
         with self.sessions_lock('sessions_add'):
             self.sessions[key] = kwds if dict1 is None else dict1
 
-    def select_session(self, sid):
-        with self.sessions_lock('select_session'):
-            if sid not in self.sessions: return
-            with self.sessions[sid]['lock']('select_session'):
+    def select_session(self, sid, *, strict=False, lock_all=True, name=''):
+        if name: name += ':'
+        name += 'select_session'
+        if lock_all:
+            with self.sessions_lock(name):
+                if strict and sid not in self.sessions: raise Exception(f'Session {sid} not found!')
+                if sid not in self.sessions: return
+                with self.sessions[sid]['lock'](name):
+                    yield self.sessions[sid]
+        else:
+            with self.sessions_lock(name):
+                if strict and sid not in self.sessions: raise Exception(f'Session {sid} not found!')
+                if sid not in self.sessions: return
+                sess = self.sessions[sid]
+            with sess['lock'](name):
                 yield self.sessions[sid]
 
-    def create_session(self, parent_sid=None, arrival_time=None, entry_loc=None, exit_loc=None):
-        
-        ## Get entry information
-        if parent_sid is not None:
-            for parent_sess in self.select_session(parent_sid):
-                arrival_time = parent_sess['departure_time']
-                entry_loc = parent_sess['exit_loc']
-                break
-            else:
-                # Parent doesn't exist
-                assert False, 'Undefined Behavior'
+    def read_session_prop(self, sid, name):
+        for sess in self.select_session(sid):
+            return sess[name]
 
-        ## Make up a destination
+    def create_session_after_parent(self, parent_sid):
+
+        for parent_sess in self.select_session(parent_sid, strict=True, name='create_session_after_parent'):
+            arrival_time = parent_sess['departure_time']
+            entry_loc = parent_sess['exit_loc']
+
         exit_loc = self.choose_exit(entry_loc)
 
-        ## Create new random session id
-        sid = f'{self.NAME}_{secrets.token_hex(4)}'
+        return self.create_session(arrival_time, entry_loc, exit_loc, parent=parent_sess)
 
-        ## Make sure we have time, entry, exit
+    def create_session(self, arrival_time, entry_loc, exit_loc, parent=None):
+        with self.sessions_lock('create_session'):
 
-        assert arrival_time is not None
-        assert entry_loc is not None
-        assert exit_loc is not None
+            ## Create new random session id
+            sid = f'{self.NAME}_{secrets.token_hex(2)}'
 
-        ## Connect to LTMS
-        resp = self.connect_srv(sid, arrival_time.isoformat())
-        transit_time = resp.transit_time
-        latest_reserve_time = resp.latest_reserve_time
+            ## Connect to LTMS
+            resp = self.connect_srv(sid, arrival_time.isoformat())
+            assert not resp.transit_time < 0, resp.transit_time
 
-        ## Set up session
-        self.sessions_add(sid,
-                          sid=sid,
-                          lock=debuggable_lock(f'{sid}_lock', RLock()),
-                          parent=parent_sess,
-                          entry_loc=entry_loc,
-                          exit_loc=exit_loc,
-                          reserved=False,
-                          limits=None,
-                          arrival_time=arrival_time,
-                          latest_reserve_time=latest_reserve_time,
-                          departure_time=arrival_time + timedelta(seconds=transit_time))
+            transit_time = resp.transit_time
+            latest_reserve_time = datetime.fromisoformat(resp.latest_reserve_time)
 
-        return sid
+            departure_time = arrival_time + timedelta(seconds=transit_time)
+
+            ## Set up session
+            self.sessions_add(sid,
+                              sid=sid,
+                              lock=debuggable_lock(f'{sid}_lock', RLock()),
+                              parent=parent,
+                              entry_loc=entry_loc,
+                              exit_loc=exit_loc,
+                              limits=None,
+                              arrival_time=arrival_time,
+                              latest_reserve_time=latest_reserve_time,
+                              departure_time=departure_time)
+
+            parent_sid = (None if parent is None else parent['sid']) 
+            rospy.loginfo('\n'.join([
+                'New session created!',
+                f'  Name:                   {sid}',
+                f'  Parent ID:              {parent_sid}',
+                f'  entry_loc:              {entry_loc}',
+                f'  exit_loc:               {exit_loc}',
+                f'  arrival_time:           {arrival_time}',
+                f'  departure_time:         {departure_time}',
+                f'  latest_reserve_time:    {latest_reserve_time}',
+                f'  Time now:               {datetime.utcnow()}',
+            ]))
+
+            return sid
 
     def sessions_update(self):
-        now = datetime.now()
+        now = datetime.utcnow()
 
-        with self.sessions_lock('sessions_update'):
-            assert self.session_order, 'We always assume that when sessions_update is run, there is some prev session'
+        assert self.active_sid is not None, 'We always assume that when sessions_update is run, there is some prev session'
+        assert self.session_order, 'We always assume that when sessions_update is run, there is some prev session'
 
-            active_sid = self.session_order[0]
+        iter_opts = dict(order=True,
+                         lock_all=False,
+                         skip=self.reserved | {self.reserving_sid},
+                         name='sessions_update [Notify]')
 
-            # clean up sessions list
-            for sid in self.sessions:
-                is_upcomming = sid in self.session_order
-                is_parent = sid == self.sessions[active_sid]['parent']['sid']
-                if not (is_upcomming or is_parent):
-                    del self.sessions[sid]
+        i = 0
+        for i, (sid, sess) in enumerate(self.iter_sessions(**iter_opts)):
+            # Update un-reserved sessions. Reserved sessions are static.
+            if sess['latest_reserve_time'] < now:
+                rospy.logdebug(f'Want to notify {sid}, but after latest_reserve_time.')
+                continue
 
-            # Mark ready-to-reserve
-            for sid in list(self.session_order):
-                sess = self.sessions[sid]
-                if sess['reserved']: continue
-                if sess['latest_reserve_time'] - now <= self.RES_TIME_LIMIT:
-                    self.reserve_q.put(sid)
+            arrival_time = sess['parent']['departure_time']
 
-            for i in range(self.NUM_SESSIONS):
-                # Update un-reserved sessions. Reserved sessions are static.
-                if i < len(self.session_order):
-                    sid = self.session_order[i]
-                    for sess in self.select_session(sid):
-                        if not sess['reserved']:
-                            resp = self.notify_srv(sid, sess['parent']['earliest_exit'])
-                            sess['latest_reserve_time'] = datetime.fromisoformat(resp.latest_reserve_time)
-                            sess['arrival_time'] = sess['parent']['departure_time']
-                            sess['departure_time'] = sess['arrival_time'] + timedelta(seconds=resp.transit_time)
+            rospy.logdebug('\n'.join([
+                'Notify!',
+                f'  Name:                   {sid}',
+                f'  Notified arrival_time:  {arrival_time}',
+                f'  Time now:               {datetime.utcnow()}',
+            ]))
 
-                # Append new sessions
-                else:
-                    parent_sid = self.session_order[i-1]
-                    sid = self.create_session(parent_sid)
-                    self.session_order.append(sid)
+            resp = self.notify_srv(sid, arrival_time.isoformat())
+            assert resp.transit_time > 0, f'Notification error for {sid}: {resp.transit_time}'
+            sess['latest_reserve_time'] = datetime.fromisoformat(resp.latest_reserve_time)
+            sess['arrival_time'] = sess['parent']['departure_time']
+            sess['departure_time'] = sess['arrival_time'] + timedelta(seconds=resp.transit_time)
 
-            rospy.logdebug(f'# Reserve Queue Length: {self.reserve_q.qsize()}')
+        for j in range(i+1, self.NUM_SESSIONS_AHEAD):
+            # Append new sessions
+            parent_sid = sid if j>1 else self.active_sid # if j>1 then sid comes from above for-loop
+            sid = self.create_session_after_parent(parent_sid)
+            self.session_order.append(sid)
 
-    def reserve(self, sess):
-        # Assumes sess is already locked by caller
-        rospy.logdebug('Reserving for %s', sess['sid'])
-        start_time = datetime.now()
+    def reserve(self, sid):
+        for sess in self.select_session(sid, strict=True, lock_all=False, name='reserve'):
 
-        if sess['reserved']: 
-            rospy.logdebug('> Already reserved!', sess['sid'])
-            return {'success': True}
+            rospy.logdebug('Reserving for %s', sid)
+            start_time = datetime.utcnow()
 
-        resp = self.reserve_srv(name=sess['sid'],
-                                entry=sess['entry_loc'],
-                                exit=sess['exit_loc'],
-                                time_ref=sess['arrival_time'].isoformat(),
-                                earliest_entry=0,
-                                latest_entry=3) # Let server choose when exactly to enter
-    
-        if not resp.success:
-            rospy.loginfo('Reservation for %s failed: %s', sess['sid'], resp.reason)
-            return {'success': False}
+            if sid in self.reserved | {self.reserving_sid}:
+                rospy.logdebug(f'Already reserved/reserving for {sid}!')
+                return True # success
+
+            resp = self.reserve_srv(name=sid,
+                                    entry=sess['entry_loc'],
+                                    exit=sess['exit_loc'],
+                                    time_ref=sess['arrival_time'].isoformat(),
+                                    earliest_entry=0,
+                                    latest_entry=3) # Let server choose when exactly to enter
         
-        rospy.logdebug(f'> Reservation succeeded! Took: {datetime.now() - start_time}')
+            if not resp.success:
+                rospy.loginfo('Reservation for %s failed: %s', sid, resp.reason)
+                return False # success
+            
+            rospy.logdebug(f'Reservation succeeded! Took: {datetime.utcnow() - start_time}')
 
-        sess['time_ref'] = datetime.fromisoformat(resp.time_ref)
-        sess['earliest_entry'] = resp.earliest_entry
-        sess['latest_entry'] = resp.latest_entry
-        sess['earliest_exit'] = resp.earliest_exit
-        sess['latest_exit'] = resp.latest_exit
-    
-        sess['arrival_time'] = sess['time_ref'] 
-        sess['arrival_time'] += timedelta(seconds=(sess['earliest_entry'] + sess['latest_entry'])/2)
-        sess['departure_time'] = sess['time_ref']
-        sess['departure_time'] += timedelta(seconds=(sess['earliest_exit'] + sess['latest_exit'])/2)
+            sess['time_ref'] = datetime.fromisoformat(resp.time_ref)
+            sess['earliest_entry'] = resp.earliest_entry
+            sess['latest_entry'] = resp.latest_entry
+            sess['earliest_exit'] = resp.earliest_exit
+            sess['latest_exit'] = resp.latest_exit
+        
+            sess['arrival_time'] = sess['time_ref'] 
+            sess['arrival_time'] += timedelta(seconds=(sess['earliest_entry'] + sess['latest_entry'])/2)
+            sess['departure_time'] = sess['time_ref']
+            sess['departure_time'] += timedelta(seconds=(sess['earliest_exit'] + sess['latest_exit'])/2)
 
-        sess['reserved'] = True
+            rospy.logdebug('Reservation complete for %s', sid)
+            rospy.logdebug('\n'.join([
+                'Reservation completed!',
+                f'  Name:           {sid}',
+                f'  Request Time:   {start_time}',
+                f'  Time now:       {datetime.utcnow()}',
+            ]))
+            return True # success
 
-        rospy.logdebug('> Reservation complete for %s', sess['sid'])
-        return {'success': True}
+    def block_until(self, cond=None, time=None, sleep_time=0.05):
+        if cond is None and time is not None:
+            cond = lambda: time <= datetime.utcnow()
+        assert cond is not None, 'Must supply release condition'
+        while not rospy.is_shutdown():
+            if cond(): break
+            rospy.sleep(sleep_time)
+
+    def switch_session(self):
+        with self.sessions_lock('switch_session'):
+            self.active_sid, *self.session_order = self.session_order
+            rospy.loginfo('Switching to session ID: %s', self.active_sid)
+            assert self.active_sid in self.reserved, 'Switching to unreserved session'
 
     def run(self):
 
-        ## Wait for init time
-        start_time = datetime.now() + self.INIT_WAIT
+        with self.sessions_lock('run [Initialization]'):
 
-        ## Initialize sessions
-        with self.sessions_lock('run [Initialize sessions]'):
+            ## Initialize sessions
+            arrival_time = datetime.utcnow() + self.INIT_WAIT
             entry_loc = 'init'
             exit_loc = self.choose_exit(entry_loc)
-            init_sid = self.create_session(None, start_time, entry_loc, exit_loc)
+            init_sid = self.create_session(arrival_time, entry_loc, exit_loc)
             self.session_order.append(init_sid)
-        rospy.Timer(rospy.Duration(1), lambda event: self.sessions_update())
+            rospy.loginfo('Initial session ID: %s', init_sid)
+
+            # append following sessions
+            parent_sid = init_sid
+            for i in range(self.NUM_SESSIONS_AHEAD):
+                sid = self.create_session_after_parent(parent_sid)
+                self.session_order.append(sid)
+                parent_sid = sid
+
+        ## Wait for initial session to be reserved
+        rospy.loginfo('Waiting for initial session to be reserved...')
+        self.block_until(lambda: init_sid in self.reserved)
 
         ## Wait for start time
-        while not rospy.is_shutdown():
-            if datetime.now() >= start_time:
-                break
-            rospy.sleep(0.1)
+
+        rospy.loginfo('Waiting to reach start time...')
+
+        init_arrival_time = self.read_session_prop(init_sid, 'arrival_time') # might have changed since reservation
+        assert datetime.utcnow() < init_arrival_time, 'You probably want to increase INIT_WAIT'
+        self.block_until(time=init_arrival_time)
+
+        ## Set active sid and startbackground session updater 
+
+        self.switch_session()
+
+        rospy.Timer(rospy.Duration(5), lambda event: self.sessions_update())
+
+        ## Start main loop
+
+        rospy.loginfo('Starting main loop...')
 
         steering, velocity = 0, 0
 
-        active_sid = init_sid
-        rospy.loginfo('Initial session ID: %s', active_sid)
-
         while not rospy.is_shutdown():
 
-            with self.sessions_lock('run [Update session order & Get Limits]'):
+            with self.sessions_lock('run [Get Limits]'):
+
+                active_sess = self.sessions[self.active_sid]
+                assert self.active_sid in self.reserved
+                print(active_sess)
+
+                switch_time = (active_sess['time_ref']
+                               + timedelta(seconds=active_sess['earliest_exit']))
                 
-                if self.sessions[active_sid]['departure_time'] <= datetime.now():
-                    self.session_order = self.session_order[1:]
-                    active_sid = self.session_order[0]
-                    rospy.loginfo('Switching to session ID: %s', active_sid)
+                if switch_time <= datetime.utcnow():
+                    self.switch_session()
+                    active_sess = self.sessions[self.active_sid]
             
-                limits_mask = self.sessions[active_sid]['limits']
+                limits_mask = active_sess['limits']
 
             if limits_mask is None:
                 rospy.logwarn('Missing driving limits')
