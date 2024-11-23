@@ -99,12 +99,14 @@ def around(l, e, n):
 
 _LOCATIONS = ['left', 'top', 'right', 'bottom']
 _PERMITTED_ROUTES = {
-    (_entry, _exit): ('full',)
+    (_entry, _exit): ('full_wo_init',)
     for _entry in _LOCATIONS
     for _exit in set(_LOCATIONS) - {_entry}
 }
 
 class Server:
+
+    SAVE_DIR = Path('/tmp/data')
 
     AVOID_MARGIN = 0.4
     TIME_HORIZON = 15
@@ -118,10 +120,10 @@ class Server:
 
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
-    LOCATIONS = _LOCATIONS + ['full', 'init']
+    LOCATIONS = _LOCATIONS + ['full', 'full_wo_init', 'init']
     PERMITTED_ROUTES = _PERMITTED_ROUTES | {
         ('init', _exit): ('full',)
-        for _exit in 'left'.split()
+        for _exit in 'bottom'.split()
     }
 
     def __init__(self):
@@ -163,8 +165,8 @@ class Server:
                              dynamics=dict(cls=self.MODEL,
                                            min_steer=-pi * 5/4, 
                                            max_steer=+pi * 5/4,
-                                           min_accel=-0.5, 
-                                           max_accel=+0.5),
+                                           min_accel=-1.5,
+                                           max_accel=+1.5),
                              interactive=False)
 
         self.environment = self.load_environment()
@@ -174,7 +176,7 @@ class Server:
         self.sessions = {}
 
         def clean_sessions_tmr(event):
-            now = datetime.now().replace(microsecond=0)
+            now = datetime.utcnow().replace(microsecond=0)
             with self.sessions_lock('clean_sessions_tmr'):
                 for sid, sess in self.get_sessions:
                     if sess['session_timeout'] < now:
@@ -252,10 +254,11 @@ class Server:
         with self.sessions_lock('sessions_add'):
             self.sessions[sid] = kwds if dict1 is None else dict1
 
-    def select_session(self, sid):
+    def select_session(self, sid, strict=False):
         with self.sessions_lock('select_session'):
-            if sid in self.sessions:
-                yield self.sessions[sid]
+            if strict and sid not in self.sessions: raise Exception(f'Session {sid} not found!')
+            if sid not in self.sessions: return
+            yield self.sessions[sid]
 
     @property
     def get_reservations(self):
@@ -270,20 +273,28 @@ class Server:
     
     @service_wrp(Connect, method=True)
     def connect_srv(self, req, resp):
+        req_time = datetime.utcnow()
 
         usr_id = req.usr_id
         its_id = f'its_{secrets.token_hex(4)}'
 
         rospy.logdebug(f'# Connecting {req.usr_id} will get here at {req.arrival_time}')
 
-        arrival_time = datetime.fromisoformat(req.arrival_time)
-        session_timeout = arrival_time + self.SESSION_TIMEOUT
+        req_arrival_time = datetime.fromisoformat(req.arrival_time)
+        session_timeout = req_arrival_time + self.SESSION_TIMEOUT
 
-        latest_reserve_time = self.latest_reserve_time(usr_id, arrival_time)
-        now = datetime.now()
+        latest_reserve_time = self.latest_reserve_time(usr_id, req_arrival_time)
+        time_left = latest_reserve_time - datetime.utcnow()
 
-        if latest_reserve_time < now:
-            rospy.loginfo(f'Invalid connection request from {usr_id}: Earlier than HPV.')
+        if not time_left.total_seconds() > 0:
+            rospy.loginfo('\n'.join([
+                'Invalid connection: No time left',
+                f'  Name:                   {req.usr_id}',
+                f'  Requested arrival_time: {req_arrival_time}',
+                f'  Latest reserve time:    {latest_reserve_time}',
+                f'  Time left:              {time_left}',
+                f'  Request Time:           {req_time}',
+            ]))
             resp.transit_time = -1000
             return
 
@@ -291,42 +302,89 @@ class Server:
 
         self.sessions_add(usr_id,
                           latest_reserve_time=latest_reserve_time,
-                          arrival_time=arrival_time,
+                          arrival_time=req_arrival_time,
                           session_timeout=session_timeout,
                           reserved=False,
                           reservation={})
+
+        latest_reserve_time -= timedelta(seconds=self.COMPUTE_TIME) # heuristic extra time
 
         resp.its_id = its_id
         resp.transit_time = self.TRANSIT_TIME
         resp.latest_reserve_time = latest_reserve_time.isoformat()
 
-        rospy.logdebug(f'# session added, {resp.its_id=}')
+        rospy.logdebug('\n'.join([
+            f'Connection OK from {req.usr_id}:',
+            f'  Requested arrival_time: {req_arrival_time}',
+            f'  Latest reserve time:    {latest_reserve_time}',
+            f'  Time left:              {time_left}',
+            f'  Request Time:           {req_time}',
+        ]))
 
     @service_wrp(Notify, method=True)
     def notify_srv(self, req, resp):
-        arrival_time = datetime.fromisoformat(req.arrival_time)
+        req_time = datetime.utcnow()
+        req_arrival_time = datetime.fromisoformat(req.arrival_time)
 
-        latest_reserve_time = self.latest_reserve_time(req.usr_id, arrival_time)
-        now = datetime.now()
+        prior_arrival_time = self.sessions[req.usr_id]["arrival_time"]
 
-        if latest_reserve_time < now:
-            rospy.loginfo(f'Invalid notification from {req.usr_id}: Earlier than HPV.')
+        latest_reserve_time = self.latest_reserve_time(req.usr_id, req_arrival_time)
+        time_left = latest_reserve_time - datetime.utcnow()
+
+        if not time_left.total_seconds() > 0:
+            rospy.loginfo('\n'.join([
+                'Invalid notification: No time left',
+                f'  Name:                   {req.usr_id}',
+                f'  Prior arrival_time:     {prior_arrival_time}',
+                f'  Requested arrival_time: {req_arrival_time}',
+                f'  Latest reserve time:    {latest_reserve_time}',
+                f'  Time left:              {time_left}',
+                f'  Request Time:           {req_time}',
+            ]))
             resp.transit_time = -1000
             return
-
+        
         for sess in self.select_session(req.usr_id):
             if sess['reserved']: 
+                rospy.loginfo('\n'.join([
+                    'Invalid notification: Already reserved',
+                    f'  Name:                   {req.usr_id}',
+                    f'  Prior arrival_time:     {prior_arrival_time}',
+                    f'  Requested arrival_time: {req_arrival_time}',
+                    f'  Latest reserve time:    {latest_reserve_time}',
+                    f'  Time left:              {time_left}',
+                    f'  Request Time:           {req_time}',
+                ]))
                 resp.transit_time = -2000
                 return # don't update
             else:
                 sess['latest_reserve_time'] = latest_reserve_time
-                sess['arrival_time'] = arrival_time
-                sess['session_timeout'] = arrival_time + self.SESSION_TIMEOUT
+                sess['arrival_time'] = req_arrival_time
+                sess['session_timeout'] = req_arrival_time + self.SESSION_TIMEOUT
                 break # update ok
         else:
-            rospy.loginfo(f'Invalid notification from {req.usr_id}: Unconnected user.')
+            rospy.loginfo('\n'.join([
+                'Invalid notification: Unconnected user',
+                f'  Name:                   {req.usr_id}',
+                f'  Prior arrival_time:     {prior_arrival_time}',
+                f'  Requested arrival_time: {req_arrival_time}',
+                f'  Latest reserve time:    {latest_reserve_time}',
+                f'  Time left:              {time_left}',
+                f'  Request Time:           {req_time}',
+            ]))
             resp.transit_time = -3000
             return # don't update
+
+        latest_reserve_time -= timedelta(seconds=2*self.COMPUTE_TIME) # heuristic extra time
+
+        rospy.logdebug('\n'.join([
+            f'Notification OK from {req.usr_id}:',
+            f'  Prior arrival_time:     {prior_arrival_time}',
+            f'  Requested arrival_time: {req_arrival_time}',
+            f'  Latest reserve time:    {latest_reserve_time}',
+            f'  Time left:              {time_left}',
+            f'  Request Time:           {req_time}',
+        ]))
 
         resp.latest_reserve_time = latest_reserve_time.isoformat()
         resp.transit_time = self.TRANSIT_TIME
@@ -341,7 +399,7 @@ class Server:
             ego_before_other = (oth_sess['arrival_time'] - ego_arrival_time).total_seconds()
             if oth_sess['reserved']:
                 # err if other is reserved and ego is earlier than other
-                if 0 < ego_before_other: return datetime.now()
+                if 0 < ego_before_other: return datetime.utcnow()
                 # skip if other is reserved
                 else: continue 
             else:
@@ -357,11 +415,10 @@ class Server:
             assert False, 'Unreachable code'
 
         time_needed = self.COMPUTE_TIME * (num_unreserved_hpv+1)
-        time_needed += self.COMPUTE_TIME # heuristic extra time
         return ego_arrival_time - timedelta(seconds=time_needed)
 
     def state_cb(self, state_msg):
-        now = datetime.now() # .replace(microsecond=0)
+        now = datetime.utcnow() # .replace(microsecond=0)
         time_log = []
 
         ## BLOCK1
@@ -375,17 +432,17 @@ class Server:
         if usr_id not in self.sessions:
             return # not connected yet
         
-        time_log.append(datetime.now() - now) 
+        time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
         ## BLOCK 2
 
-        for sess in self.select_session(usr_id):
+        for sess in self.select_session(usr_id, strict=True):
             if not sess['reserved']: return # not reserved so no limits avail
             time_ref = sess['reservation']['time_ref']
             pass4 = sess['reservation']['analysis']['pass4']    
         
-        time_log.append(datetime.now() - now) 
+        time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
         ## BLOCK 3
@@ -400,25 +457,13 @@ class Server:
             rospy.loginfo('State outside of timeline for Limits: %s', usr_id)
             return # outside timeline
 
-        time_log.append(datetime.now() - now) 
+        time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
         ## BLOCK 4
 
-        # idx = (lookahead - self.grid.domain.lo[:2]) / np.array(self.grid.spacings[:2])
-        # idx = np.where(self.grid._is_periodic_dim[:2], idx % np.array(self.grid.shape[:2]), idx)
-        # idx = np.round(idx).astype(int)
-        idx = (np.array([x, y, h]) - self.grid.domain.lo[:3]) / np.array(self.grid.spacings)[:3]
-        idx = np.where(self.grid._is_periodic_dim[:3], idx % np.array(self.grid.shape[:3]), idx)
-        idx = np.round(idx).astype(int)
-
-        time_log.append(datetime.now() - now) 
-        now += time_log[-1]
-
-        ## BLOCK 5
-
         def lrcs(vf, x, i):
-            now = datetime.now()
+            now = datetime.utcnow()
             time_log = []
 
             ## BLOCK 5.1
@@ -438,7 +483,7 @@ class Server:
                 [0., 1.],
             ])
 
-            time_log.append(datetime.now() - now)
+            time_log.append(datetime.utcnow() - now)
             now += time_log[-1]
 
             ## BLOCK 5.2
@@ -446,7 +491,7 @@ class Server:
             ix = self.solver.nearest_index(x)
             dvdx = self.solver.spatial_deriv(vf[i], ix)
 
-            time_log.append(datetime.now() - now) 
+            time_log.append(datetime.utcnow() - now) 
             now += time_log[-1]
 
             ## BLOCK 5.3
@@ -454,7 +499,7 @@ class Server:
             a = np.array(vf[(i+1, *ix)] + self.solver.time_step*(dvdx.T @ f))
             b = np.array(self.solver.time_step*(dvdx.T @ g))
 
-            time_log.append(datetime.now() - now) 
+            time_log.append(datetime.utcnow() - now) 
             now += time_log[-1]
 
             ## BLOCK 5.4
@@ -466,7 +511,7 @@ class Server:
             control_vecs = [np.linspace(*lohi) for lohi in control_space]
             control_grid = np.meshgrid(*control_vecs)
 
-            time_log.append(datetime.now() - now) 
+            time_log.append(datetime.utcnow() - now) 
             now += time_log[-1]
 
             ## BLOCK 5.6
@@ -477,15 +522,18 @@ class Server:
             terms = [us*b_ for us, b_ in zip(control_grid, b)]
             mask = sum(terms, a) <= 0
 
-            time_log.append(datetime.now() - now) 
+            time_log.append(datetime.utcnow() - now) 
             now += time_log[-1]
 
             ## BLOCK 5.7
 
-            save_path = Path(f'/svea_ws/src/ltms/data/{usr_id}/lrcs_{i}.npy')
-            if not save_path.exists():
-                save_path.mkdir(exist_ok=True)
-                np.save(save_path / f'ltms_{i}.npy', mask, allow_pickle=True)
+            if self.SAVE_DIR:
+
+                save_path = self.SAVE_DIR / usr_id
+                save_path.mkdir(parents=True, exist_ok=True)
+                save_path /= f'lrcs_{i}.npy'
+                if not save_path.exists():
+                    np.save(save_path, mask, allow_pickle=True)
 
             rospy.logdebug('\n'.join(['Took:'] + [
                 f'  Block 5.{i+1}: {dt.total_seconds()}'
@@ -494,27 +542,43 @@ class Server:
 
             return mask, control_vecs
 
-        # vf = shp.project_onto(pass4, 1, 2)
-        # jdx, dist = closest_subzero(vf, idx)
-        # rospy.loginfo(f'{dist=}')
-        # state = np.array([
-        #     self.solver.grid.coordinate_vectors[n][j]
-        #     for n, j in enumerate(jdx)
-        # ])
-        state = np.array([x, y, h, 0, v])
+        # get index of state
+        iz = np.array(self.grid.nearest_index(state), int)
+        iz = np.where(iz >= self.grid.shape, np.array(self.grid.shape)-1, iz)
+        iz = list(iz)
+        del iz[3]
+        iz = (ceil(i), *iz)
+
+        cells = np.array(np.where(pass4.min(axis=4) <= 0)).T
+        dists = np.linalg.norm(cells - iz, axis=1)
+        closest = cells[np.argmin(dists)]
+
+        rospy.logdebug('\n'.join([
+            'Closest limits:',
+            f'  {iz=}',
+            f'  {closest=}',
+        ]))
+
+        i = closest[0]
+        state = np.array([self.grid.coordinate_vectors[0][closest[1]],
+                          self.grid.coordinate_vectors[1][closest[2]],
+                          self.grid.coordinate_vectors[2][closest[3]],
+                          0,
+                          self.grid.coordinate_vectors[4][closest[4]],])
+
         mask, ctrl_vecs = lrcs(pass4, state, ceil(i))
 
-        time_log.append(datetime.now() - now) 
+        time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
-        ## BLOCK 6
+        ## BLOCK 5
         limits_msg = NamedBytes(usr_id, state_msg.header.stamp, [x - 128 for x in mask.tobytes()])
         self.Limits.publish(limits_msg)
 
-        time_log.append(datetime.now() - now) 
+        time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
-        ## BLOCK 7
+        ## BLOCK 6
 
         rospy.logdebug('\n'.join(['Took:'] + [
             f'  Block {i+1}: {dt.total_seconds()}'
@@ -522,10 +586,11 @@ class Server:
         ] + [
             f'  Total: {sum([dt.total_seconds() for dt in time_log])}'
         ]))
-        rospy.loginfo('Sending Limits')
+        rospy.loginfo(f'Sending limits to {usr_id}')
 
     @service_wrp(Reserve, method=True)
     def reserve_srv(self, req, resp):
+        req_time = datetime.utcnow()
         resp.success = False
         resp.reason = 'Unknown.'
 
@@ -549,7 +614,7 @@ class Server:
             return
         
         latest_reserve_time = self.latest_reserve_time(req.name, time_ref)
-        now = datetime.now()
+        now = datetime.utcnow()
         if latest_reserve_time < now:
             resp.reason = f'Reservation late: {(now - latest_reserve_time).total_seconds()} s too late'
             rospy.logdebug(f'# {resp.reason}')
@@ -562,8 +627,9 @@ class Server:
         if not resp.success:
             rospy.loginfo(f"Reservation for {req.name} recjected: {resp.reason}")
             return
-
-        rospy.loginfo(f"Reservation for {req.name} approved.")
+        
+        resp_time = datetime.utcnow()
+        rospy.loginfo(f"Reservation for {req.name} approved. Took: {resp_time - req_time}")
 
     def reserve(self, sid, req, resp):
 
@@ -574,9 +640,8 @@ class Server:
             return
         
         # Debugging path
-        save_path = None # to disable
-        save_path = Path(f'/svea_ws/src/ltms/data/{sid}')
-        save_path.mkdir(exist_ok=True)
+        save_path = self.SAVE_DIR / sid
+        save_path.mkdir(parents=True, exist_ok=True)
 
         result = {}
         try:
@@ -700,7 +765,7 @@ class Server:
         rate = rospy.Rate(5)
 
         while not rospy.is_shutdown():
-            now = datetime.now()
+            now = datetime.utcnow()
 
             for tube in self.resolve_dangers(now, quiet=True):
                 marker = self.tube_to_marker(tube)
