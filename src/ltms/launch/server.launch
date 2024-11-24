@@ -4,6 +4,7 @@
     <!-- Launch arguments -->
     <arg name="name"          default="svea0"/>
     <arg name="use_foxglove"  default="true"/>
+    <arg name="use_fake"      default="false"/>
 
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
@@ -13,13 +14,13 @@
     <!-- Start map_server -->
     <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
-    <node name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
+    <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
         <param name="host" value="nats://10.0.2.41:4222" />
         <!-- <param name="host" value="nats://host.docker.internal:4222" /> -->
     </node>
 
     <!-- Start server node -->
-    <node name="ltms" pkg="ltms" type="server.py" output="screen">
+    <node name="ltms" pkg="ltms" type="$(eval 'fake_server.py' if use_fake else 'server.py')" output="screen">
       <param name="name"      value="ltms"/>
       <rosparam>
         model: Bicycle5D

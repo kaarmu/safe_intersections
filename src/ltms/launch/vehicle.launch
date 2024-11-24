@@ -2,20 +2,16 @@
 <launch>
 
     <!-- Launch arguments -->
-    <arg name="name"    default="sveax"/>
-    <arg name="area"    default="sml"/>
-    <arg name="is_sim"  default="true"/>
+    <arg name="name"      default="sveax"/>
+    <arg name="area"      default="sml"/>
+    <arg name="is_sim"    default="true"/>
+    <arg name="usr_Fake"  default="false"/>
 
     <arg name="initial_pose_x" default="-2.65488696"/>
     <arg name="initial_pose_y" default="-1.64422277"/>
     <arg name="initial_pose_a" default="1.57" /> <!-- wrt to map-->
 
     <arg name="use_foxglove"    default="false"/>
-
-    <!-- Start Mocap -->
-    <include file="$(find svea_mocap)/launch/mocap_only.launch">
-      <arg name="mocap_name" value="$(arg name)"/>
-    </include>
 
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
@@ -25,12 +21,12 @@
     <!-- Start map_server -->
     <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
-    <node name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
+    <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
         <param name="host" value="nats://sml-server:4222" />
     </node>
 
     <!-- Start vehicle node -->
-    <node name="$(arg name)" pkg="ltms" type="vehicle.py" output="screen">
+    <node name="$(arg name)" pkg="ltms" type="$(eval 'fake_vehicle.py' if use_fake else 'vehicle.py')" output="screen">
       <rosparam subst_value="true">
         name:   $(arg name)
         area:   $(arg area)
