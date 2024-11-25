@@ -1,9 +1,8 @@
-#! /usr/bin/env python3.9
+#! /usr/bin/env python3
 
 # Plain python imports
 import numpy as np
 import secrets
-import json
 from threading import RLock
 from math import pi, ceil, floor
 from datetime import datetime, timedelta
@@ -15,11 +14,12 @@ from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
 from svea_msgs.msg import VehicleState as StateMsg
 
+from session_mgr import *
+from nats_ros_connector.nats_manager import NATSManager
+
 import hj_reachability as hj
 import hj_reachability.shapes as shp
 from ltms_util import Solver, create_chaos
-from ltms_util.debuggable_lock import *
-from nats_ros_connector.nats_manager import NATSManager
 
 def load_param(name, value=None):
     """Function used to get parameters from ROS parameter server
@@ -34,37 +34,6 @@ def load_param(name, value=None):
     if value is None:
         assert rospy.has_param(name), f'Missing parameter "{name}"'
     return rospy.get_param(name, value)
-
-def closest_subzero(vf, idx):
-    """
-    Find the index of the closest sub-zero element to the given index in a 5D numpy array.
-    
-    Parameters:
-    vf (np.ndarray): A 5D numpy array.
-    idx (tuple): A 5-tuple representing the index to find the closest sub-zero element to.
-    
-    Returns:
-    tuple: A 5-tuple `jdx` corresponding to the index of the closest sub-zero element.
-    """
-    # Ensure idx is a valid 5-tuple.
-    if len(idx) != len(vf.shape):
-        raise ValueError("idx must be a 5-tuple")
-    
-    # Get the indices of all sub-zero elements in `vf`.
-    subzero_indices = np.argwhere(vf < 0)
-    
-    # If there are no sub-zero elements, return None or raise an error.
-    if len(subzero_indices) == 0:
-        raise ValueError("No sub-zero elements found in the array")
-    
-    # Calculate the distance of each sub-zero index to the given index `idx`.
-    distances = np.linalg.norm(subzero_indices - np.array(idx), axis=1)
-    
-    # Find the index of the closest sub-zero element.
-    closest_idx = np.argmin(distances)
-    jdx = tuple(subzero_indices[closest_idx])
-    
-    return jdx, distances[closest_idx]
 
 def service_wrp(srv_cls, method=False):
     Req  = srv_cls._request_class
@@ -121,10 +90,10 @@ class Server:
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
     EXIT_LOCATIONS = _LOCATIONS
     LOCATIONS = _LOCATIONS + ['full', 'full_wo_init', 'init']
-    PERMITTED_ROUTES = _PERMITTED_ROUTES | {
-        ('init', _exit): ('full',)
+    PERMITTED_ROUTES = dict(list(_PERMITTED_ROUTES.items()) + [
+        (('init', _exit), ('full',))
         for _exit in 'bottom'.split()
-    }
+    ])
 
     def __init__(self):
 
@@ -151,12 +120,11 @@ class Server:
         self.MAX_BOUNDS = load_param('~max_bounds', [+1.5, +1.5, +np.pi, +0.6])
         self.MAX_BOUNDS = np.array([eval(x) if isinstance(x, str) else x for x in self.MAX_BOUNDS])
 
+        ## Create simulators, models, managers, etc.
+        
         self.nats_mgr = NATSManager()
 
-        ## Create simulators, models, managers, etc.
-
-        self.grid = hj.Grid.from_lattice_parameters_and_boundary_conditions(hj.sets.Box(self.MIN_BOUNDS, self.MAX_BOUNDS),
-                                                                            self.GRID_SHAPE, periodic_dims=2)
+        self.sessions = SessionMgr()
 
         self.solver = Solver(grid=self.grid, 
                              time_step=self.TIME_STEP,
@@ -172,17 +140,6 @@ class Server:
         self.environment = self.load_environment()
         self.offline_passes = self.load_offline_analyses()
 
-        self.sessions_lock = debuggable_lock('sessions_lock', RLock())
-        self.sessions = {}
-
-        def clean_sessions_tmr(event):
-            now = datetime.utcnow().replace(microsecond=0)
-            with self.sessions_lock('clean_sessions_tmr'):
-                for sid, sess in self.get_sessions:
-                    if sess['session_timeout'] < now:
-                        del self.sessions[sid]
-        rospy.Timer(rospy.Duration(2), clean_sessions_tmr)
-
         ## Advertise services
 
         self.Connect = self.nats_mgr.new_service('/server/connect', Connect, self.connect_srv)
@@ -195,7 +152,7 @@ class Server:
         ## Node initialized
 
         rospy.loginfo(f'{self.__class__.__name__} initialized!')
-
+    
     def load_environment(self):
         out = {}
         for loc in self.LOCATIONS:
@@ -239,38 +196,6 @@ class Server:
         print('Offline analyses done.')
         return out
     
-    @property
-    def iter_sessions(self):
-        with self.sessions_lock('iter_sessions'):
-            yield from self.sessions.items()
-
-    @property
-    def get_sessions(self):
-        with self.sessions_lock('get_sessions'):
-            return list(self.sessions.items())
-    
-    def sessions_add(self, sid, dict1=None, **kwds):
-        assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
-        with self.sessions_lock('sessions_add'):
-            self.sessions[sid] = kwds if dict1 is None else dict1
-
-    def select_session(self, sid, strict=False):
-        with self.sessions_lock('select_session'):
-            if strict and sid not in self.sessions: raise Exception(f'Session {sid} not found!')
-            if sid not in self.sessions: return
-            yield self.sessions[sid]
-
-    @property
-    def get_reservations(self):
-        return [(sid, sess['reservation']) for sid, sess in self.iter_sessions if sess['reserved']]
-    
-    def add_reservation(self, sid, dict1=None, **kwds):
-        assert bool(dict1 is not None) ^ bool(kwds), 'Use either dict1 or keywords'
-        with self.sessions_lock('add_reservation'):
-            for sess in self.select_session(sid):
-                sess['reservation'] = kwds if dict1 is None else dict1
-                sess['reserved'] = True
-    
     @service_wrp(Connect, method=True)
     def connect_srv(self, req, resp):
         req_time = datetime.utcnow()
@@ -300,12 +225,10 @@ class Server:
 
         rospy.logdebug(f'# timeout at {session_timeout}')
 
-        self.sessions_add(usr_id,
+        self.sessions.add(usr_id,
                           latest_reserve_time=latest_reserve_time,
                           arrival_time=req_arrival_time,
-                          session_timeout=session_timeout,
-                          reserved=False,
-                          reservation={})
+                          session_timeout=session_timeout)
 
         latest_reserve_time -= timedelta(seconds=self.COMPUTE_TIME) # heuristic extra time
 
@@ -324,17 +247,19 @@ class Server:
     @service_wrp(Notify, method=True)
     def notify_srv(self, req, resp):
         req_time = datetime.utcnow()
+
+        req_sid = req.usr_id
         req_arrival_time = datetime.fromisoformat(req.arrival_time)
 
-        prior_arrival_time = self.sessions[req.usr_id]["arrival_time"]
+        prior_arrival_time = self.sessions.read_prop(req_sid, 'arrival_time')
 
-        latest_reserve_time = self.latest_reserve_time(req.usr_id, req_arrival_time)
+        latest_reserve_time = self.latest_reserve_time(req_sid, req_arrival_time)
         time_left = latest_reserve_time - datetime.utcnow()
 
         if not time_left.total_seconds() > 0:
             rospy.loginfo('\n'.join([
                 'Invalid notification: No time left',
-                f'  Name:                   {req.usr_id}',
+                f'  Name:                   {req_sid}',
                 f'  Prior arrival_time:     {prior_arrival_time}',
                 f'  Requested arrival_time: {req_arrival_time}',
                 f'  Latest reserve time:    {latest_reserve_time}',
@@ -344,7 +269,9 @@ class Server:
             resp.transit_time = -1000
             return
         
-        for sess in self.select_session(req.usr_id):
+        opts = dict(lock_all=False,
+                    _dbgname='notify_srv')
+        for sess in self.sessions.select(req_sid, **opts):
             if sess['reserved']: 
                 rospy.loginfo('\n'.join([
                     'Invalid notification: Already reserved',
@@ -392,10 +319,10 @@ class Server:
 
     def latest_reserve_time(self, ego_sid, ego_arrival_time):
         num_unreserved_hpv = 0 # count how many high-priority vehicles are unreserved
-        for oth_sid, oth_sess in self.get_sessions:
-            # skip if other = ego
-            if oth_sid == ego_sid: continue
-            
+        opts = dict(lock_all=False,
+                    skip={ego_sid},
+                    _dbgname='latest_reserve_time')
+        for oth_sid, oth_sess in self.sessions.iterate(**opts):
             ego_before_other = (oth_sess['arrival_time'] - ego_arrival_time).total_seconds()
             if oth_sess['reserved']:
                 # err if other is reserved and ego is earlier than other
@@ -423,13 +350,13 @@ class Server:
 
         ## BLOCK1
 
-        usr_id = state_msg.child_frame_id
+        sid = state_msg.child_frame_id
         x = state_msg.x
         y = state_msg.y
         h = state_msg.yaw
         v = state_msg.v
 
-        if usr_id not in self.sessions:
+        if not self.sessions.is_known(sid):
             return # not connected yet
         
         time_log.append(datetime.utcnow() - now) 
@@ -437,10 +364,12 @@ class Server:
 
         ## BLOCK 2
 
-        for sess in self.select_session(usr_id, strict=True):
+        opts = dict(strict=True,
+                    _dbgname='state_cb')
+        for sess in self.sessions.select(sid, **opts):
             if not sess['reserved']: return # not reserved so no limits avail
-            time_ref = sess['reservation']['time_ref']
-            pass4 = sess['reservation']['analysis']['pass4']    
+            time_ref = sess['time_ref']
+            pass4 = sess['analysis']['pass4']
         
         time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
@@ -454,7 +383,7 @@ class Server:
         i = (now - time_ref).total_seconds() // self.TIME_STEP
 
         if not 0 <= i < len(self.solver.timeline)-1:
-            rospy.loginfo('State outside of timeline for Limits: %s', usr_id)
+            rospy.loginfo('State outside of timeline for Limits: %s', sid)
             return # outside timeline
 
         time_log.append(datetime.utcnow() - now) 
@@ -529,7 +458,7 @@ class Server:
 
             if self.SAVE_DIR:
 
-                save_path = self.SAVE_DIR / usr_id
+                save_path = self.SAVE_DIR / sid
                 save_path.mkdir(parents=True, exist_ok=True)
                 save_path /= f'lrcs_{i}.npy'
                 if not save_path.exists():
@@ -572,7 +501,9 @@ class Server:
         now += time_log[-1]
 
         ## BLOCK 5
-        limits_msg = NamedBytes(usr_id, state_msg.header.stamp, [x - 128 for x in mask.tobytes()])
+
+
+        limits_msg = NamedBytes(sid, state_msg.header.stamp, [x - 128 for x in mask.tobytes()])
         self.Limits.publish(limits_msg)
 
         time_log.append(datetime.utcnow() - now) 
@@ -586,7 +517,7 @@ class Server:
         ] + [
             f'  Total: {sum([dt.total_seconds() for dt in time_log])}'
         ]))
-        rospy.loginfo(f'Sending limits to {usr_id}')
+        rospy.loginfo(f'Sending limits to {sid}')
 
     @service_wrp(Reserve, method=True)
     def reserve_srv(self, req, resp):
@@ -600,7 +531,7 @@ class Server:
             resp.reason = f"Malformed ISO time: '{req.time_ref}'."
             return
 
-        if req.name not in self.sessions:
+        if not self.sessions.is_known(req.name):
             rospy.loginfo(f"Reservation cannot be done for unknown session: '{req.name}'.")
 
         if req.entry not in self.ENTRY_LOCATIONS:
@@ -625,7 +556,7 @@ class Server:
         self.reserve(req.name, req, resp)
 
         if not resp.success:
-            rospy.loginfo(f"Reservation for {req.name} recjected: {resp.reason}")
+            rospy.loginfo(f"Reservation for {req.name} rejected: {resp.reason}")
             return
         
         resp_time = datetime.utcnow()
@@ -685,41 +616,28 @@ class Server:
             resp.reason = f'Reservation Error: {msg}'
 
         else:
-            self.add_reservation(sid,
-                                 name=req.name, 
-                                 time_ref=time_ref,
-                                 entry=req.entry, exit=req.exit,
-                                 earliest_entry=earliest_entry,
-                                 latest_entry=latest_entry,
-                                 earliest_exit=earliest_exit,
-                                 latest_exit=latest_exit,
-                                 analysis=result)
-            
-            # flat_corridor = shp.project_onto(result['pass4'], 1, 2) <= 0
+            opts = dict(strict=True,
+                        _dbgname='reserve')
+            for sess in self.sessions.select(sid, **opts):
+                sess['name']            = req.name
+                sess['time_ref']        = time_ref
+                sess['entry']           = req.entry
+                sess['exit']            = req.exit
+                sess['earliest_entry']  = earliest_entry
+                sess['latest_entry']    = latest_entry
+                sess['earliest_exit']   = earliest_exit
+                sess['latest_exit']     = latest_exit
 
-            resp.time_ref = time_ref.isoformat()
+                sess['reserved'] = True
+
+            resp.time_ref       = time_ref.isoformat()
             resp.earliest_entry = earliest_entry
-            resp.latest_entry = latest_entry
-            resp.earliest_exit = earliest_exit
-            resp.latest_exit = latest_exit
-            # resp.shape = list(flat_corridor.shape)
-            # resp.corridor = flat_corridor.tobytes()
-            resp.success = True
-            resp.reason = ''
+            resp.latest_entry   = latest_entry
+            resp.earliest_exit  = earliest_exit
+            resp.latest_exit    = latest_exit
+            resp.success        = True
+            resp.reason         = ''
 
-        # with open(f'/svea_ws/src/ltms/data/{sid}.json', 'w') as f:
-        #     json.dump({
-        #         'time_ref': time_ref.isoformat(),
-        #         'earliest_entry': earliest_entry,
-        #         'latest_entry': latest_entry,
-        #         'earliest_exit': earliest_exit,
-        #         'latest_exit': latest_exit,
-        #         'output_earliest_entry': result['earliest_entry'],
-        #         'output_latest_entry': result['latest_entry'],
-        #         'output_earliest_exit': result['earliest_exit'],
-        #         'output_latest_exit': result['latest_exit'],
-        #     }, f)
-        
     def resolve_dangers(self, time_ref, quiet=False):
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
@@ -776,4 +694,3 @@ if __name__ == '__main__':
 
     ## Start node ##
     Server().run()
-
