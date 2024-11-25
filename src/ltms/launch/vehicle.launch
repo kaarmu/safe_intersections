@@ -5,7 +5,7 @@
     <arg name="name"      default="sveax"/>
     <arg name="area"      default="sml"/>
     <arg name="is_sim"    default="true"/>
-    <arg name="usr_Fake"  default="false"/>
+    <arg name="use_fake"  default="false"/>
 
     <arg name="initial_pose_x" default="-2.65488696"/>
     <arg name="initial_pose_y" default="-1.64422277"/>
@@ -22,7 +22,8 @@
     <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
     <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
-        <param name="host" value="nats://sml-server:4222" />
+	    <param name="host" value="nats://sml-server:4222" />
+	    <!-- <param name="host" value="nats://10.0.1.134:4222" /> -->
     </node>
 
     <!-- Start vehicle node -->

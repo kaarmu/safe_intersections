@@ -9,6 +9,7 @@ from svea.interfaces import ActuationInterface
 from svea_msgs.msg import VehicleState as VehicleStateMsg
 
 from session_mgr import *
+from nats_ros_connector.nats_manager import NATSManager
 
 # ROS imports
 import rospy
@@ -76,7 +77,6 @@ class Vehicle:
     NUM_SESSIONS_AHEAD = 4
 
     DELTA_TIME = 0.1
-    LOOP_TIME = 5.0
     
     MIN_VEL = 0.4
     MAX_VEL = 0.8
@@ -125,7 +125,7 @@ class Vehicle:
         self.INIT_WAIT = load_param('~init_wait', 25)
         self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
 
-        self.RES_TIME_LIMIT = load_param('~res_time_limit', 30)
+        self.RES_TIME_LIMIT = load_param('~res_time_limit', 40)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
         ## Session management
@@ -168,16 +168,13 @@ class Vehicle:
         ## Initiatlize interfaces
 
         self.actuator = ActuationInterface(self.NAME).start()
+
+        self.nats_mgr = None
         self.nats_mgr = NATSManager()
 
         ## Initiatlize interfaces
 
         self.actuator = ActuationInterface(self.NAME).start()
-
-        ## Create service proxies
-        self.connect_srv = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
-        self.notify_srv = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
-        self.reserve_srv = self.nats_mgr.new_serviceproxy('/server/reserve', Reserve)
 
         self.target = None
         def limits_cb(msg):
@@ -192,15 +189,27 @@ class Vehicle:
                 limits = np.frombuffer(bytes([x+128 for x in msg.mask]), dtype=bool)
                 sess['limits'] = limits.reshape(len(self.U1_VEC), len(self.U2_VEC))
 
-        self.State = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
-        self.Limits = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
-
         def limits_tmr(event):
             sid = self.sessions.active_sid
             if sid is not None:
                 self.state.child_frame_id = sid
-                self.State.publish(self.state)
-        rospy.Timer(rospy.Duration(0.1), limits_tmr)
+                # self.State.publish(self.state)
+        rospy.Timer(rospy.Duration(0.2), limits_tmr)
+
+        ## Create external comms.
+
+        if self.nats_mgr is None:
+            self.connect_srv    = rospy.ServiceProxy('/server/connect', Connect)
+            self.notify_srv     = rospy.ServiceProxy('/server/notify', Notify)
+            self.reserve_srv    = rospy.ServiceProxy('/server/reserve', Reserve)
+            self.State          = rospy.Publisher(f'/server/state', VehicleStateMsg, queue_size=5)
+            self.Limits         = rospy.Subscriber(f'/server/limits', NamedBytes, limits_cb)
+        else:
+            self.connect_srv    = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
+            self.notify_srv     = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
+            self.reserve_srv    = self.nats_mgr.new_serviceproxy('/server/reserve', Reserve)
+            self.State          = self.nats_mgr.new_publisher(f'/server/state', VehicleStateMsg, queue_size=5)
+            self.Limits         = self.nats_mgr.new_subscriber(f'/server/limits', NamedBytes, limits_cb)
 
         ## Node initialized
 
@@ -264,8 +273,6 @@ class Vehicle:
 
     def updater(self):
 
-        if self.sessions.active_sid is None: return
-
         ## Update un-reserved sessions. Reserved sessions are static.
 
         opts = dict(order=True,
@@ -277,7 +284,8 @@ class Vehicle:
         for i, (sid, sess) in enumerate(self.sessions.iterate(**opts)):
             now = datetime.utcnow()
 
-            if sess['latest_reserve_time'] < now:
+            if sess['latest_reserve_time'] < now - timedelta(seconds=1):
+                # 1 s extra buffer just to be sure to not notify to close
                 rospy.logwarn(f'Want to update-notify {sid}, but after latest_reserve_time.')
                 continue
 
@@ -301,6 +309,9 @@ class Vehicle:
             sess['departure_time'] = sess['arrival_time'] + timedelta(seconds=resp.transit_time)
 
         ## Append new sessions
+
+        # There is no session in queue/order and there is no active session
+        if i == -1 and self.sessions.active_sid is None: return
 
         for i in range(i+1, self.NUM_SESSIONS_AHEAD):
             parent_sid = sid if i>0 else self.sessions.active_sid # if i>0 then sid comes from above for-loop
@@ -401,6 +412,8 @@ class Vehicle:
         exit_loc = self.choose_exit(entry_loc)
         init_sid = self.create_session(arrival_time, entry_loc, exit_loc)
         rospy.loginfo('Initial session ID: %s', init_sid)
+        
+        self.updater()
 
         ## Wait for initial session to be reserved
         rospy.loginfo('Waiting for initial session to be reserved...')
