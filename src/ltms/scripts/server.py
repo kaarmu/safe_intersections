@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#! /usr/bin/env python3.9
 
 # Plain python imports
 import numpy as np
@@ -9,10 +9,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 
+from skimage import measure
+
 import rospy
 from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
 from svea_msgs.msg import VehicleState as StateMsg
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 
 from session_mgr import *
 from nats_ros_connector.nats_manager import NATSManager
@@ -84,7 +88,7 @@ class Server:
     MAX_WINDOW_ENTRY = 2
 
     SESSION_TIMEOUT = timedelta(seconds=30)
-    TRANSIT_TIME = 15 # [s] made up, roughly accurate
+    TRANSIT_TIME = 12 # [s] made up, roughly accurate
     COMPUTE_TIME = 10 # [s] made up, roughly accurate
 
     ENTRY_LOCATIONS = _LOCATIONS + ['init']
@@ -122,11 +126,15 @@ class Server:
 
         ## Create simulators, models, managers, etc.
         
+        self.nats_mgr = None
         self.nats_mgr = NATSManager()
 
         self.sessions = SessionMgr()
 
-        self.solver = Solver(grid=self.grid, 
+        grid = hj.Grid.from_lattice_parameters_and_boundary_conditions(hj.sets.Box(self.MIN_BOUNDS, self.MAX_BOUNDS),
+                                                                       self.GRID_SHAPE, periodic_dims=2)
+
+        self.solver = Solver(grid=grid, 
                              time_step=self.TIME_STEP,
                              time_horizon=self.TIME_HORIZON,
                              accuracy='low',
@@ -141,13 +149,19 @@ class Server:
         self.offline_passes = self.load_offline_analyses()
 
         ## Advertise services
-
-        self.Connect = self.nats_mgr.new_service('/server/connect', Connect, self.connect_srv)
-        self.Notify = self.nats_mgr.new_service('/server/notify', Notify, self.notify_srv)
-        self.Resere = self.nats_mgr.new_service('/server/reserve', Reserve, self.reserve_srv)
         
-        self.Limits = self.nats_mgr.new_publisher(f'/server/limits', NamedBytes, queue_size=5)
-        self.State = self.nats_mgr.new_subscriber(f'/server/state', StateMsg, self.state_cb)
+        if self.nats_mgr is None:
+            self.Connect    = rospy.Service('/server/connect', Connect, self.connect_srv)
+            self.Notify     = rospy.Service('/server/notify', Notify, self.notify_srv)
+            self.Resere     = rospy.Service('/server/reserve', Reserve, self.reserve_srv)
+            self.Limits     = rospy.Publisher(f'/server/limits', NamedBytes, queue_size=5)
+            self.State      = rospy.Subscriber(f'/server/state', StateMsg, self.state_cb)
+        else:
+            self.Connect    = self.nats_mgr.new_service('/server/connect', Connect, self.connect_srv)
+            self.Notify     = self.nats_mgr.new_service('/server/notify', Notify, self.notify_srv)
+            self.Resere     = self.nats_mgr.new_service('/server/reserve', Reserve, self.reserve_srv)
+            self.Limits     = self.nats_mgr.new_publisher(f'/server/limits', NamedBytes, queue_size=5)
+            self.State      = self.nats_mgr.new_subscriber(f'/server/state', StateMsg, self.state_cb)
 
         ## Node initialized
 
@@ -163,7 +177,7 @@ class Server:
                 out[loc] = np.load(filename, allow_pickle=True)
                 print(f'Loading {filename}')
             else:
-                out.update(create_chaos(self.grid, loc))
+                out.update(create_chaos(self.solver.grid, loc))
                 print(f'Saving {filename}')
                 np.save(filename, out[loc], allow_pickle=True)
         print('Environment done.')
@@ -351,6 +365,7 @@ class Server:
         ## BLOCK1
 
         sid = state_msg.child_frame_id
+        veh_time = datetime.fromtimestamp(state_msg.header.stamp.to_time())
         x = state_msg.x
         y = state_msg.y
         h = state_msg.yaw
@@ -380,7 +395,7 @@ class Server:
         # i = ceil((now - time_ref).total_seconds() // self.TIME_STEP)
         # i = min(i + 5, len(self.solver.timeline) - 1)
         state = np.array([x, y, h, 0, v])
-        i = (now - time_ref).total_seconds() // self.TIME_STEP
+        i = (veh_time - time_ref).total_seconds() // self.TIME_STEP
 
         if not 0 <= i < len(self.solver.timeline)-1:
             rospy.loginfo('State outside of timeline for Limits: %s', sid)
@@ -472,8 +487,8 @@ class Server:
             return mask, control_vecs
 
         # get index of state
-        iz = np.array(self.grid.nearest_index(state), int)
-        iz = np.where(iz >= self.grid.shape, np.array(self.grid.shape)-1, iz)
+        iz = np.array(self.solver.grid.nearest_index(state), int)
+        iz = np.where(iz >= self.solver.grid.shape, np.array(self.solver.grid.shape)-1, iz)
         iz = list(iz)
         del iz[3]
         iz = (ceil(i), *iz)
@@ -489,11 +504,11 @@ class Server:
         ]))
 
         i = closest[0]
-        state = np.array([self.grid.coordinate_vectors[0][closest[1]],
-                          self.grid.coordinate_vectors[1][closest[2]],
-                          self.grid.coordinate_vectors[2][closest[3]],
+        state = np.array([self.solver.grid.coordinate_vectors[0][closest[1]],
+                          self.solver.grid.coordinate_vectors[1][closest[2]],
+                          self.solver.grid.coordinate_vectors[2][closest[3]],
                           0,
-                          self.grid.coordinate_vectors[4][closest[4]],])
+                          self.solver.grid.coordinate_vectors[4][closest[4]],])
 
         mask, ctrl_vecs = lrcs(pass4, state, ceil(i))
 
@@ -588,11 +603,15 @@ class Server:
 
             max_window_entry = round(min(latest_entry - earliest_entry, self.MAX_WINDOW_ENTRY), 1)
             assert max_window_entry, 'Negotiation Failed: Invalid entry window requested'
-            
+
+            rospy.logdebug('Analysis: Resolving dangers...')
+
             dangers = self.resolve_dangers(time_ref)
             dangers = [danger
                        for _id, danger in dangers.items()
                        if _id[:5] != sid[:5]]
+
+            rospy.logdebug('Analysis: Running...')
 
             self.solver.run_analysis('pass2', 'pass3', 'pass4',
                                      min_window_entry=1,  max_window_entry=max_window_entry,
@@ -616,6 +635,8 @@ class Server:
             resp.reason = f'Reservation Error: {msg}'
 
         else:
+            rospy.logdebug('Analysis: Success!')
+
             opts = dict(strict=True,
                         _dbgname='reserve')
             for sess in self.sessions.select(sid, **opts):
@@ -627,6 +648,7 @@ class Server:
                 sess['latest_entry']    = latest_entry
                 sess['earliest_exit']   = earliest_exit
                 sess['latest_exit']     = latest_exit
+                sess['analysis']        = result
 
                 sess['reserved'] = True
 
@@ -641,33 +663,37 @@ class Server:
     def resolve_dangers(self, time_ref, quiet=False):
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
+
+        opts = dict(lock_all=False,
+                    only=self.sessions._reserved,
+                    _dbgname='resolve_dangers')
         
         dangers = {}
-        for sid, reservation in self.get_reservations:
-            earliest_overlap = max(time_ref, reservation['time_ref'])
-            latest_overlap = min(time_ref + td_horizon, reservation['time_ref'] + td_horizon)
+        for sid, sess in self.sessions.iterate(**opts):
+            earliest_overlap = max(time_ref, sess['time_ref'])
+            latest_overlap = min(time_ref + td_horizon, sess['time_ref'] + td_horizon)
             overlap = (latest_overlap - earliest_overlap).total_seconds()
 
             if not 0 < overlap:
                 continue
             
-            danger = np.ones(self.solver.timeline.shape + self.grid.shape)
+            danger = np.ones(self.solver.timeline.shape + self.solver.grid.shape)
             if time_ref < earliest_overlap:
                 # HPV:     [-----j----)
                 # LPV: [---i-----)
                 i_offset = (earliest_overlap - time_ref).total_seconds()
-                j_offset = (latest_overlap - reservation['time_ref']).total_seconds()
+                j_offset = (latest_overlap - sess['time_ref']).total_seconds()
                 i = ceil(i_offset / self.TIME_STEP)
                 j = ceil(j_offset / self.TIME_STEP)
-                danger[i:] = reservation['analysis']['pass4'][:j]
+                danger[i:] = sess['analysis']['pass4'][:j]
             else: 
                 # HPV: [---i-----)
                 # LPV:     [-----j----)
-                i_offset = (earliest_overlap - reservation['time_ref']).total_seconds()
+                i_offset = (earliest_overlap - sess['time_ref']).total_seconds()
                 j_offset = (latest_overlap - time_ref).total_seconds()
                 i = ceil(i_offset / self.TIME_STEP)
                 j = ceil(j_offset / self.TIME_STEP)
-                danger[:j] = reservation['analysis']['pass4'][i:i+j]
+                danger[:j] = sess['analysis']['pass4'][i:i+j]
             dangers[sid] = danger
 
         if not dangers and not quiet:
@@ -675,18 +701,40 @@ class Server:
 
         return dangers
 
-    def tube_to_marker(self, tube):
-        pass
-
     def run(self):
-        
-        rate = rospy.Rate(5)
+
+        marker_pub = rospy.Publisher('/markers', Marker, queue_size=2)
+
+        rate = rospy.Rate(2)
 
         while not rospy.is_shutdown():
             now = datetime.utcnow()
 
             for tube in self.resolve_dangers(now, quiet=True):
-                marker = self.tube_to_marker(tube)
+                tube = shp.project_onto(tube, 0, 1, 2)
+                values = tube.transpose(1, 2, 0) # x, y, t
+                verts, faces, _, _ = measure.marching_cubes(values, level=0)
+                
+                marker = Marker()
+                marker.header.frame_id = "map"
+                marker.type = Marker.TRIANGLE_LIST
+                marker.action = Marker.ADD
+
+                # Set marker properties
+                marker.scale.x = 1.0
+                marker.scale.y = 1.0
+                marker.scale.z = 1.0
+                marker.color.a = 1.0
+                marker.color.r = 0.0
+                marker.color.g = 1.0
+                marker.color.b = 0.0
+
+                # Add points for the triangles
+                marker.points = [Point(x=verts[i][0], y=verts[i][1], z=verts[i][2])
+                                 for face in faces for i in face]
+
+                marker = self.tube_to_marker(verts, faces)
+                marker_pub.publish(marker)
 
             rate.sleep()
 

@@ -33,12 +33,12 @@ class SessionMgr:
             self._add(sid,
                       sid=sid,
                       reserved=False,
-                      lock=debuggable_lock(_dbgname, RLock()),
+                      lock=debuggable_lock(f'{sid}_lock', RLock()),
                       **kwds)
             if _addorder:
                 self._order += (sid,)
 
-    def _iterate_unlocked(self, *, skip=(), order=None, _dbgname):
+    def _iterate_unlocked(self, *, skip=..., only=..., order=None, _dbgname):
         if order is None:
             items = list(self._sessions.items())
         else:
@@ -46,7 +46,8 @@ class SessionMgr:
                      for sid in self._order]
 
         for sid, sess in items:
-            if sid in skip: continue
+            if only is not Ellipsis and sid not in only: continue
+            if skip is not Ellipsis and sid in skip: continue
             with sess['lock'](_dbgname):
                 yield (sid, sess)
 
@@ -74,13 +75,13 @@ class SessionMgr:
                 with sess['lock'](_dbgname):
                     yield sess
         else:
-            with self._lock(_dbgname):
+            with self._lock(_dbgname + '.1'):
                 if strict and sid not in self._sessions:
                     raise Exception(f'Session {sid} not found!')
                 if sid not in self._sessions: return
                 sess = self._sessions[sid]
 
-            with sess['lock'](sid):
+            with sess['lock'](_dbgname + '.2'):
                 yield sess
 
     def select_active(self, *, _dbgname='', **kwds):
@@ -107,9 +108,18 @@ class SessionMgr:
                          skip=(self.active_sid,
                                *self._order),
                          _dbgname='cleaner',)
+        
+        cleaned = []
         for sid in self.iterate(**iter_opts):
             del self._sessions[sid]
             self._reserved -= {sid}
+            cleaned.append(sid)
+        
+        if cleaned:
+            rospy.logdebug('\n'.join([
+                'Cleaned away:',
+                *(f'  - {sid}' for sid in cleaned),
+            ]))
 
     def is_known(self, sid):
         return sid in self._sessions

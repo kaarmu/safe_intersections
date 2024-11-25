@@ -16,7 +16,7 @@
 
     <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
         <param name="host" value="nats://10.0.2.41:4222" />
-        <!-- <param name="host" value="nats://host.docker.internal:4222" /> -->
+        <!-- <param name="host" value="nats://10.0.1.134:4222" /> -->
     </node>
 
     <!-- Start server node -->
