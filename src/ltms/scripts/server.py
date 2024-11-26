@@ -103,11 +103,12 @@ class Server:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.INFO)
 
         ## Load parameters
 
         self.NAME = load_param('~name')
+        self.USE_NATS = load_param('~use_nats', False)
 
         self.DATA_DIR = load_param('~data_dir')
         self.DATA_DIR = Path(self.DATA_DIR)
@@ -126,8 +127,7 @@ class Server:
 
         ## Create simulators, models, managers, etc.
         
-        self.nats_mgr = None
-        self.nats_mgr = NATSManager()
+        self.nats_mgr = NATSManager() if self.USE_NATS else None
 
         self.sessions = SessionMgr()
 
@@ -357,6 +357,71 @@ class Server:
 
         time_needed = self.COMPUTE_TIME * (num_unreserved_hpv+1)
         return ego_arrival_time - timedelta(seconds=time_needed)
+    
+    def lrcs(self, vf, x, i):
+        now = datetime.utcnow()
+        time_log = []
+
+        ## BLOCK 5.1
+
+        f = np.array([
+            x[4] * np.cos(x[2]),
+            x[4] * np.sin(x[2]),
+            (x[4] * np.tan(x[3]))/self.solver.reach_dynamics.wheelbase,
+            0.,
+            0.,
+        ])
+        g = np.array([
+            [0., 0.],
+            [0., 0.],
+            [0., 0.],
+            [1., 0.],
+            [0., 1.],
+        ])
+
+        time_log.append(datetime.utcnow() - now)
+        now += time_log[-1]
+
+        ## BLOCK 5.2
+
+        ix = self.solver.nearest_index(x)
+        dvdx = self.solver.spatial_deriv(vf[i], ix)
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        ## BLOCK 5.3
+
+        a = np.array(vf[(i+1, *ix)] + self.solver.time_step*(dvdx.T @ f))
+        b = np.array(self.solver.time_step*(dvdx.T @ g))
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        ## BLOCK 5.4
+
+        control_space = np.array([
+            self.solver.reach_dynamics.control_space.lo,
+            self.solver.reach_dynamics.control_space.hi,
+        ]).T
+        control_vecs = [np.linspace(*lohi) for lohi in control_space]
+        control_grid = np.meshgrid(*control_vecs)
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        ## BLOCK 5.6
+
+        # This is the important part.
+        # Essentially we want: a + b \cdot u <= 0
+        # Here, `mask` masks the set over the control space spanned by `control_vecs`
+        terms = [us*b_ for us, b_ in zip(control_grid, b)]
+        mask = sum(terms, a) <= 0
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        return mask, control_vecs
 
     def state_cb(self, state_msg):
         now = datetime.utcnow() # .replace(microsecond=0)
@@ -372,7 +437,8 @@ class Server:
         v = state_msg.v
 
         if not self.sessions.is_known(sid):
-            return # not connected yet
+            rospy.logwarn(f'unknown {sid=}')
+            return
         
         time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
@@ -383,6 +449,7 @@ class Server:
                     _dbgname='state_cb')
         for sess in self.sessions.select(sid, **opts):
             if not sess['reserved']: return # not reserved so no limits avail
+            # if veh_time < sess['time_ref']: sess = sess['parent'] # NOTE: unsafe!
             time_ref = sess['time_ref']
             pass4 = sess['analysis']['pass4']
         
@@ -398,93 +465,19 @@ class Server:
         i = (veh_time - time_ref).total_seconds() // self.TIME_STEP
 
         if not 0 <= i < len(self.solver.timeline)-1:
-            rospy.loginfo('State outside of timeline for Limits: %s', sid)
+            rospy.loginfo('\n'.join([
+                'State outside of timeline for Limits:',
+                f'  Name:           {sid}',
+                f'  Time step:      {i}',
+                f'  Vehicle Time:   {veh_time}',
+                f'  Time reference: {time_ref}',
+            ]))
             return # outside timeline
 
         time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
         ## BLOCK 4
-
-        def lrcs(vf, x, i):
-            now = datetime.utcnow()
-            time_log = []
-
-            ## BLOCK 5.1
-
-            f = np.array([
-                x[4] * np.cos(x[2]),
-                x[4] * np.sin(x[2]),
-                (x[4] * np.tan(x[3]))/self.solver.reach_dynamics.wheelbase,
-                0.,
-                0.,
-            ])
-            g = np.array([
-                [0., 0.],
-                [0., 0.],
-                [0., 0.],
-                [1., 0.],
-                [0., 1.],
-            ])
-
-            time_log.append(datetime.utcnow() - now)
-            now += time_log[-1]
-
-            ## BLOCK 5.2
-
-            ix = self.solver.nearest_index(x)
-            dvdx = self.solver.spatial_deriv(vf[i], ix)
-
-            time_log.append(datetime.utcnow() - now) 
-            now += time_log[-1]
-
-            ## BLOCK 5.3
-
-            a = np.array(vf[(i+1, *ix)] + self.solver.time_step*(dvdx.T @ f))
-            b = np.array(self.solver.time_step*(dvdx.T @ g))
-
-            time_log.append(datetime.utcnow() - now) 
-            now += time_log[-1]
-
-            ## BLOCK 5.4
-
-            control_space = np.array([
-                self.solver.reach_dynamics.control_space.lo,
-                self.solver.reach_dynamics.control_space.hi,
-            ]).T
-            control_vecs = [np.linspace(*lohi) for lohi in control_space]
-            control_grid = np.meshgrid(*control_vecs)
-
-            time_log.append(datetime.utcnow() - now) 
-            now += time_log[-1]
-
-            ## BLOCK 5.6
-
-            # This is the important part.
-            # Essentially we want: a + b \cdot u <= 0
-            # Here, `mask` masks the set over the control space spanned by `control_vecs`
-            terms = [us*b_ for us, b_ in zip(control_grid, b)]
-            mask = sum(terms, a) <= 0
-
-            time_log.append(datetime.utcnow() - now) 
-            now += time_log[-1]
-
-            ## BLOCK 5.7
-
-            if self.SAVE_DIR:
-
-                save_path = self.SAVE_DIR / sid
-                save_path.mkdir(parents=True, exist_ok=True)
-                save_path /= f'lrcs_{i}.npy'
-                if not save_path.exists():
-                    np.save(save_path, mask, allow_pickle=True)
-
-            rospy.logdebug('\n'.join(['Took:'] + [
-                f'  Block 5.{i+1}: {dt.total_seconds()}'
-                for i, dt in enumerate(time_log)
-            ]))
-
-            return mask, control_vecs
 
         # get index of state
         iz = np.array(self.solver.grid.nearest_index(state), int)
@@ -493,30 +486,52 @@ class Server:
         del iz[3]
         iz = (ceil(i), *iz)
 
-        cells = np.array(np.where(pass4.min(axis=4) <= 0)).T
-        dists = np.linalg.norm(cells - iz, axis=1)
-        closest = cells[np.argmin(dists)]
+        # cells = np.array(np.where(pass4.min(axis=4) <= 0)).T
+        # dists = np.linalg.norm(cells - iz, axis=1)
+        # closest = cells[np.argmin(dists)]
 
-        rospy.logdebug('\n'.join([
-            'Closest limits:',
-            f'  {iz=}',
-            f'  {closest=}',
-        ]))
+        # rospy.logdebug('\n'.join([
+        #     'Closest limits:',
+        #     f'  {iz=}',
+        #     f'  {closest=}',
+        # ]))
 
-        i = closest[0]
-        state = np.array([self.solver.grid.coordinate_vectors[0][closest[1]],
-                          self.solver.grid.coordinate_vectors[1][closest[2]],
-                          self.solver.grid.coordinate_vectors[2][closest[3]],
+        i = iz[0] # closest[0]
+        state = np.array([self.solver.grid.coordinate_vectors[0][iz[1]],
+                          self.solver.grid.coordinate_vectors[1][iz[2]],
+                          self.solver.grid.coordinate_vectors[2][iz[3]],
                           0,
-                          self.solver.grid.coordinate_vectors[4][closest[4]],])
-
-        mask, ctrl_vecs = lrcs(pass4, state, ceil(i))
+                          self.solver.grid.coordinate_vectors[4][iz[4]],])
 
         time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
         ## BLOCK 5
 
+        mask, ctrl_vecs = self.lrcs(pass4, state, ceil(i))
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        ## BLOCK 6
+
+        if False and self.SAVE_DIR:
+
+            save_path = self.SAVE_DIR / sid
+            save_path.mkdir(parents=True, exist_ok=True)
+            save_path /= f'lrcs_{i}.npy'
+            if not save_path.exists():
+                np.save(save_path, mask, allow_pickle=True)
+
+        rospy.logdebug('\n'.join(['Took:'] + [
+            f'  Block 5.{i+1}: {dt.total_seconds()}'
+            for i, dt in enumerate(time_log)
+        ]))
+
+        time_log.append(datetime.utcnow() - now) 
+        now += time_log[-1]
+
+        ## BLOCK 7
 
         limits_msg = NamedBytes(sid, state_msg.header.stamp, [x - 128 for x in mask.tobytes()])
         self.Limits.publish(limits_msg)
@@ -524,7 +539,7 @@ class Server:
         time_log.append(datetime.utcnow() - now) 
         now += time_log[-1]
 
-        ## BLOCK 6
+        ## BLOCK 8
 
         rospy.logdebug('\n'.join(['Took:'] + [
             f'  Block {i+1}: {dt.total_seconds()}'
@@ -733,7 +748,6 @@ class Server:
                 marker.points = [Point(x=verts[i][0], y=verts[i][1], z=verts[i][2])
                                  for face in faces for i in face]
 
-                marker = self.tube_to_marker(verts, faces)
                 marker_pub.publish(marker)
 
             rate.sleep()

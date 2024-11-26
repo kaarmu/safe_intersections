@@ -3,8 +3,9 @@
 
     <!-- Launch arguments -->
     <arg name="name"          default="svea0"/>
-    <arg name="use_foxglove"  default="true"/>
     <arg name="use_fake"      default="false"/>
+    <arg name="use_nats"      default="$(eval not use_fake)"/>
+    <arg name="use_foxglove"  default="true"/>
 
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
@@ -12,9 +13,9 @@
     </include>
 
     <!-- Start map_server -->
-    <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
+    <!-- <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/> -->
 
-    <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
+    <node if="$(arg use_nats)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
         <param name="host" value="nats://10.0.2.41:4222" />
         <!-- <param name="host" value="nats://10.0.1.134:4222" /> -->
     </node>
