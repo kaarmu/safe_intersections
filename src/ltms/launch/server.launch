@@ -21,7 +21,7 @@
     </node>
 
     <!-- Start server node -->
-    <node name="ltms" pkg="ltms" type="$(eval 'fake_server.py' if use_fake else 'server.py')" output="screen">
+    <node name="ltms" pkg="ltms" type="$(eval 'fake_server.py' if use_fake else 'server2.py')" output="screen">
       <param name="name"      value="ltms"/>
       <rosparam>
         model: Bicycle5D
