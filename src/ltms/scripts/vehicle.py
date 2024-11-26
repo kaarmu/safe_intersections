@@ -121,11 +121,12 @@ class Vehicle:
 
         self.NAME = load_param('~name', 'svea')
         self.AREA = load_param('~area', 'sml')
+        self.USE_NATS = load_param('~use_nats', False)
 
         self.INIT_WAIT = load_param('~init_wait', 25)
         self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
 
-        self.RES_TIME_LIMIT = load_param('~res_time_limit', 40)
+        self.RES_TIME_LIMIT = load_param('~res_time_limit', 25)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
         ## Session management
@@ -138,10 +139,6 @@ class Vehicle:
         rospy.Timer(rospy.Duration(2), 
                     lambda event: self.reserver())
 
-        ## Rate
-        
-        self.rate = rospy.Rate(10)
-
         ## Initialize mocap
         
         self.state = VehicleStateMsg()
@@ -149,7 +146,9 @@ class Vehicle:
         def state_cb(pose, twist):
             state = VehicleStateMsg()
             state.header = pose.header
-            state.child_frame_id = self.NAME
+            if self.sessions.active_sid is not None: 
+                state.child_frame_id = self.sessions.active_sid
+            state.header.stamp = rospy.Time.now() + rospy.Duration(0.3)
             state.x = pose.pose.position.x 
             state.y = pose.pose.position.y
             roll, pitch, yaw = euler_from_quaternion([pose.pose.orientation.x,
@@ -163,14 +162,13 @@ class Vehicle:
         mf.TimeSynchronizer([
             mf.Subscriber(f'/qualisys/{self.NAME}/pose', PoseStamped),
             mf.Subscriber(f'/qualisys/{self.NAME}/velocity', TwistStamped)
-        ], 10).registerCallback(state_cb)
+        ], 1).registerCallback(state_cb)
 
         ## Initiatlize interfaces
 
-        self.actuator = ActuationInterface(self.NAME).start()
+        self.actuator = ActuationInterface(self.NAME).start(wait=True)
 
-        self.nats_mgr = None
-        self.nats_mgr = NATSManager()
+        self.nats_mgr = NATSManager() if self.USE_NATS else None
 
         ## Initiatlize interfaces
 
@@ -189,12 +187,7 @@ class Vehicle:
                 limits = np.frombuffer(bytes([x+128 for x in msg.mask]), dtype=bool)
                 sess['limits'] = limits.reshape(len(self.U1_VEC), len(self.U2_VEC))
 
-        def limits_tmr(event):
-            sid = self.sessions.active_sid
-            if sid is not None:
-                self.state.child_frame_id = sid
-                # self.State.publish(self.state)
-        rospy.Timer(rospy.Duration(0.2), limits_tmr)
+        rospy.Timer(rospy.Duration(0.2), lambda event: self.State.publish(self.state))
 
         ## Create external comms.
 
@@ -202,7 +195,7 @@ class Vehicle:
             self.connect_srv    = rospy.ServiceProxy('/server/connect', Connect)
             self.notify_srv     = rospy.ServiceProxy('/server/notify', Notify)
             self.reserve_srv    = rospy.ServiceProxy('/server/reserve', Reserve)
-            self.State          = rospy.Publisher(f'/server/state', VehicleStateMsg, queue_size=5)
+            self.State          = rospy.Publisher(f'/server/state', VehicleStateMsg, queue_size=1)
             self.Limits         = rospy.Subscriber(f'/server/limits', NamedBytes, limits_cb)
         else:
             self.connect_srv    = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
@@ -253,6 +246,7 @@ class Vehicle:
                           arrival_time=arrival_time,
                           latest_reserve_time=latest_reserve_time,
                           departure_time=departure_time,
+                          stop=False,
                           _addorder=True,
                           _dbgname=f'create_session [{sid}]')
 
@@ -283,6 +277,8 @@ class Vehicle:
         i = -1
         for i, (sid, sess) in enumerate(self.sessions.iterate(**opts)):
             now = datetime.utcnow()
+
+            if sess['stop']: return
 
             if sess['latest_reserve_time'] < now - timedelta(seconds=1):
                 # 1 s extra buffer just to be sure to not notify to close
@@ -371,7 +367,9 @@ class Vehicle:
                         f'  Mark 3:     {mark3_time}',
                         f'  Reason: {resp.reason}',
                     ]))
-                    rospy.signal_shutdown('Fatal Error')
+                    sess['stop'] = True
+                    return
+                    # rospy.signal_shutdown('Fatal Error')
                 else: 
                     sess['time_ref'] = datetime.fromisoformat(resp.time_ref)
                     sess['earliest_entry'] = resp.earliest_entry
@@ -391,6 +389,11 @@ class Vehicle:
                     rospy.logdebug('\n'.join([
                         'Reservation done:',
                         f'  Name:           {sid}',
+                        f'  Route:          {sess["entry_loc"]} -> {sess["exit_loc"]}',
+                        f'  Earliest Entry: {resp.earliest_entry}',
+                        f'  Latest Entry:   {resp.latest_entry}',
+                        f'  Earliest Exit:  {resp.earliest_exit}',
+                        f'  Latest Exit:    {resp.latest_exit}',
                         f'  Request Time:   {start_time}',
                         f'  Time now:       {now}',
                         f'  Took:           {now - start_time}',
@@ -435,6 +438,8 @@ class Vehicle:
 
         rospy.loginfo('Starting main loop...')
 
+        rate = rospy.Rate(10)
+
         steering, velocity = 0, 0
 
         while not rospy.is_shutdown():
@@ -442,16 +447,21 @@ class Vehicle:
             opts = dict(_dbgname='run [Get Limits]')
             for active_sess in self.sessions.select_active(**opts):
 
-                switch_time = (active_sess['time_ref']
-                               + timedelta(seconds=active_sess['earliest_exit']))
-                
-                if switch_time <= datetime.utcnow():
+                departure_time = active_sess['departure_time']
+                if departure_time <= datetime.utcnow():
                     self.sessions.next()
+                    if active_sess['stop']: return
                     break
                 
                 limits_mask = active_sess['limits']
 
             else:
+
+                if departure_time <= datetime.utcnow():
+                    rospy.logfatal('Always true')
+
+                delta_str = 0
+                delta_vel = 0
 
                 if limits_mask is None:
                     rospy.logwarn('Missing driving limits')
@@ -469,20 +479,63 @@ class Vehicle:
                             steering = self.U1_VEC[i]
                             velocity += self.U2_VEC[j] * self.DELTA_TIME
                     if self.STATE_DIMS == 5:
-                        args = np.argwhere(limits_mask)
-                        if len(args) == 0:
+                        # args = np.argwhere(limits_mask)
+                        # if len(args) == 0:
+                        cell = mean_true_cell(limits_mask)
+                        if cell is None:
                             rospy.loginfo('No admissible driving limits')
                         else:
-                            n = np.random.randint(0, len(args))
-                            i, j = args[n]
-                            steering += self.U1_VEC[i] * self.DELTA_TIME
-                            velocity += self.U2_VEC[j] * self.DELTA_TIME
+                            # n = np.random.randint(0, len(args))
+                            # i, j = args[n]
+                            i, j = [max(0, min(50, round(c * 1.5))) for c in cell]
+                            delta_str = self.U1_VEC[i] * self.DELTA_TIME
+                            delta_vel = self.U2_VEC[j] * self.DELTA_TIME
+                            steering += delta_str
+                            velocity += delta_vel
 
-                rospy.loginfo(f'Steering: {steering}, Velocity: {velocity}')
+                rospy.loginfo(f'Steering: {steering:0.02f} ({delta_str:+0.02f}), Velocity: {velocity:0.02f} ({delta_vel:+0.02f})')
                 self.actuator.send_control(steering=steering, velocity=velocity)
 
                 # Sleep
-                self.rate.sleep()
+                rate.sleep()
+
+def mean_true_cell(mask):
+    # Step 1: Find the coordinates of all True cells
+    true_cells = np.argwhere(mask)
+
+    # Step 2: Check if there are any True cells
+    if len(true_cells) == 0:
+        return None  # No True cells in the mask
+
+    # Step 3: Compute the mean of the coordinates
+    mean_coords = true_cells.mean(axis=0)
+
+    # Step 4: Round to the nearest integer if you need discrete coordinates
+    mean_cell = tuple(np.round(mean_coords).astype(int))
+
+    return mean_cell
+
+def furthest_true_cell(mask):
+    theta = np.random.uniform(0, 2*np.pi)
+    direction = np.array([np.cos(theta), np.sin(theta)])
+
+    center = np.array(mask.shape) // 2
+
+    true_cells = np.argwhere(mask)
+
+    vectors = true_cells - center
+
+    projections = vectors @ direction
+
+    pos_indices = projections > 0
+    true_cells_pos = true_cells[pos_indices]
+    dist_pos = np.linalg.norm(vectors[pos_indices], axis=1)
+
+    if len(dist_pos) == 0: return None
+    max_index = np.argmax(dist_pos)
+    furthest_cell = true_cells_pos[max_index]
+
+    return tuple(furthest_cell)
 
 if __name__ == '__main__':
 

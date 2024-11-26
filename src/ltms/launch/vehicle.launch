@@ -5,7 +5,8 @@
     <arg name="name"      default="sveax"/>
     <arg name="area"      default="sml"/>
     <arg name="is_sim"    default="true"/>
-    <arg name="use_fake"  default="false"/>
+    <arg name="use_fake"  default="$(arg is_sim)"/>
+    <arg name="use_nats"  default="$(eval not use_fake)"/>
 
     <arg name="initial_pose_x" default="-2.65488696"/>
     <arg name="initial_pose_y" default="-1.64422277"/>
@@ -21,17 +22,22 @@
     <!-- Start map_server -->
     <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
 
-    <node unless="$(arg use_fake)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
+    <node if="$(arg use_nats)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
 	    <param name="host" value="nats://sml-server:4222" />
 	    <!-- <param name="host" value="nats://10.0.1.134:4222" /> -->
     </node>
 
+    <include file="$(find svea_mocap)/launch/mocap_only.launch">
+	    <arg name="mocap_name" value="qualisys"/>
+    </include>
+
     <!-- Start vehicle node -->
     <node name="$(arg name)" pkg="ltms" type="$(eval 'fake_vehicle.py' if use_fake else 'vehicle.py')" output="screen">
       <rosparam subst_value="true">
-        name:   $(arg name)
-        area:   $(arg area)
-        is_sim: $(arg is_sim)
+        name:     $(arg name)
+        area:     $(arg area)
+        is_sim:   $(arg is_sim)
+        use_nats: $(arg use_nats)
       </rosparam>
       <param name="use_mocap" value="$(eval area == 'sml' and not is_sim)"/>
     </node>
