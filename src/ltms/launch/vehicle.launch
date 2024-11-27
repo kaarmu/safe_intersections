@@ -26,7 +26,7 @@
     </include>
 
     <!-- Start map_server -->
-    <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/>
+	    <!-- <node if="$(eval not is_sim)" name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/> -->
 
     <node if="$(arg use_nats)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
 	    <param name="host" value="nats://sml-server:4222" />

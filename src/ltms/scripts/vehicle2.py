@@ -7,14 +7,13 @@ from datetime import datetime, timedelta
 # SVEA imports
 from svea.interfaces import ActuationInterface
 from svea_msgs.msg import VehicleState as VehicleStateMsg
-from svea.controllers.pure_pursuit import PurePursuitController
+from svea.controllers.pure_pursuit import PurePursuitSpeedController
 
 from session_mgr import *
 from nats_ros_connector.nats_manager import NATSManager
 
 # ROS imports
 import rospy
-from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Path
 from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
@@ -24,12 +23,12 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from threading import RLock
  
-def array_to_path(xy_array, frame_id="map"):
+def array_to_path(xy_array, frame_id="mocap"):
     """
     Converts an array of (x, y) coordinates to a nav_msgs/Path message.
 
     :param xy_array: List of (x, y) tuples [(x1, y1), (x2, y2), ...].
-    :param frame_id: The frame in which the path is defined (default is "map").
+    :param frame_id: The frame in which the path is defined.
     :return: A nav_msgs/Path message.
     """
     path_msg = Path()
@@ -145,7 +144,7 @@ class Vehicle:
 
         ## Initialize node
 
-        rospy.init_node(self.__class__.__name__, log_level=rospy.DEBUG)
+        rospy.init_node(self.__class__.__name__, log_level=rospy.INFO)
 
         ## Load parameters
 
@@ -153,13 +152,15 @@ class Vehicle:
         self.AREA = load_param('~area', 'sml')
         self.USE_NATS = load_param('~use_nats', False)
 
-        self.INIT_WAIT = load_param('~init_wait', 25)
-        self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
+        self.INIT_WAIT = load_param('~init_wait', 30)
+        self.RES_TIME_LIMIT = load_param('~res_time_limit', self.INIT_WAIT)
 
-        self.RES_TIME_LIMIT = load_param('~res_time_limit', 25)
+        self.INIT_WAIT = timedelta(seconds=self.INIT_WAIT)
         self.RES_TIME_LIMIT = timedelta(seconds=self.RES_TIME_LIMIT)
 
         ## Session management
+
+        self.reservation_stop = False
 
         self.sessions = SessionMgr()
 
@@ -176,6 +177,7 @@ class Vehicle:
         def state_cb(pose, twist):
             state = VehicleStateMsg()
             state.header = pose.header
+            state.header.frame_id = 'mocap'
             if self.sessions.active_sid is not None: 
                 state.child_frame_id = self.sessions.active_sid
             state.header.stamp = rospy.Time.now() + rospy.Duration(0.3)
@@ -197,7 +199,7 @@ class Vehicle:
         ## Initiatlize interfaces
 
         self.target = None
-        self.controller = PurePursuitController()
+        self.controller = PurePursuitSpeedController()
         self.actuator = ActuationInterface().start(wait=True)
 
         self.nats_mgr = NATSManager() if self.USE_NATS else None
@@ -209,7 +211,7 @@ class Vehicle:
             self.notify_srv     = rospy.ServiceProxy('/server/notify', Notify)
             self.reserve_srv    = rospy.ServiceProxy('/server/reserve', Reserve)
             self.path_pub       = rospy.Publisher('/path', Path, queue_size=2)
-            self.targ_pub       = rospy.Publisher('/target', PointStamped, queue_size=2)
+            self.targ_pub       = rospy.Publisher('/target', PoseStamped, queue_size=2)
         else:
             self.connect_srv    = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
             self.notify_srv     = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
@@ -327,6 +329,8 @@ class Vehicle:
 
     def reserver(self):
 
+        if self.reservation_stop: return
+
         ## Find next to reserve
 
         opts = dict(order=True, 
@@ -380,6 +384,7 @@ class Vehicle:
                         f'  Reason: {resp.reason}',
                     ]))
                     sess['stop'] = True
+                    self.reservation_stop = True
                     return
                     # rospy.signal_shutdown('Fatal Error')
                 else: 
@@ -480,13 +485,14 @@ class Vehicle:
                 steps = round(delta.total_seconds() / 0.2) # time step
                 i = max(0, min(len(corridor), steps))
                 target = corridor[i]
+                target = (*target[:2], 0.6)
 
-                pnt = PointStamped()
+                pnt = PoseStamped()
                 pnt.header.stamp = rospy.Time.now()
-                pnt.header.frame_id = 'map'
-                pnt.point.x = target[0]
-                pnt.point.y = target[1]
-                pnt.point.z = target[2]
+                pnt.header.frame_id = 'mocap'
+                pnt.pose.position.x = target[0]
+                pnt.pose.position.y = target[1]
+                pnt.pose.position.z = target[2]
 
                 self.targ_pub.publish(pnt)
                 self.path_pub.publish(array_to_path(corridor[..., :2]))
@@ -499,9 +505,10 @@ class Vehicle:
                     return
                     
                 xt, yt, vt = target
-                self.controller.set_target_velocity(vt)
+                self.controller.target_velocity = vt
                 steering, velocity = self.controller.compute_control(self.state, (xt, yt))
 
+                rospy.loginfo(f'{xt = }, {yt = }, {vt = }')
                 rospy.loginfo(f'Steering: {steering:0.02f}, Velocity: {velocity:0.02f}')
                 self.actuator.send_control(steering=steering, velocity=velocity)
 
