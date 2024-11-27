@@ -14,6 +14,7 @@ from nats_ros_connector.nats_manager import NATSManager
 
 # ROS imports
 import rospy
+from nav_msgs.msg import Path
 from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
 from ltms_util.debuggable_lock import *
@@ -21,6 +22,33 @@ import message_filters as mf
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from threading import RLock
+ 
+def array_to_path(xy_array, frame_id="map"):
+    """
+    Converts an array of (x, y) coordinates to a nav_msgs/Path message.
+
+    :param xy_array: List of (x, y) tuples [(x1, y1), (x2, y2), ...].
+    :param frame_id: The frame in which the path is defined (default is "map").
+    :return: A nav_msgs/Path message.
+    """
+    path_msg = Path()
+    path_msg.header.stamp = rospy.Time.now()
+    path_msg.header.frame_id = frame_id
+
+    for x, y in xy_array:
+        pose = PoseStamped()
+        pose.header.stamp = rospy.Time.now()
+        pose.header.frame_id = frame_id
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = 0.0  # Default Z
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = 0.0
+        pose.pose.orientation.w = 1.0  # Default orientation (facing forward)
+        path_msg.poses.append(pose)
+
+    return path_msg
 
 def state_to_pose(state):
     pose = PoseStamped()
@@ -167,23 +195,19 @@ class Vehicle:
 
         ## Initiatlize interfaces
 
-        self.actuator = ActuationInterface(self.NAME).start(wait=True)
-
-        self.nats_mgr = NATSManager() if self.USE_NATS else None
-
-        ## Initiatlize interfaces
-
         self.target = None
         self.controller = PurePursuitController()
-        self.actuator = ActuationInterface(self.NAME).start()
-        
+        self.actuator = ActuationInterface().start(wait=True)
 
+        self.nats_mgr = NATSManager() if self.USE_NATS else None
+        
         ## Create external comms.
 
         if self.nats_mgr is None:
             self.connect_srv    = rospy.ServiceProxy('/server/connect', Connect)
             self.notify_srv     = rospy.ServiceProxy('/server/notify', Notify)
             self.reserve_srv    = rospy.ServiceProxy('/server/reserve', Reserve)
+            self.path_pub       = rospy.Publisher('/path', Path, queue_size=2)
         else:
             self.connect_srv    = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
             self.notify_srv     = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
@@ -362,7 +386,7 @@ class Vehicle:
                     sess['latest_entry'] = resp.latest_entry
                     sess['earliest_exit'] = resp.earliest_exit
                     sess['latest_exit'] = resp.latest_exit
-                    sess['corridor'] = np.frombuffer(bytes(resp.corridor))
+                    sess['corridor'] = np.frombuffer(bytes(resp.corridor), float).reshape((-1, 3))
                 
                     sess['arrival_time'] = sess['time_ref'] 
                     sess['arrival_time'] += timedelta(seconds=(sess['earliest_entry'] + sess['latest_entry'])/2)
@@ -431,6 +455,8 @@ class Vehicle:
 
         while not rospy.is_shutdown():
 
+            corridor = None
+
             opts = dict(_dbgname='run [Get Limits]')
             for active_sess in self.sessions.select_active(**opts):
 
@@ -439,7 +465,7 @@ class Vehicle:
                 if not active_sess['reserved']:
                     rospy.logfatal('Active session is unreserved!')
                     rospy.signal_shutdown('Active session is unreserved!')
-                    break
+                    return
 
                 departure_time = active_sess['departure_time']
                 if departure_time <= now:
@@ -453,16 +479,20 @@ class Vehicle:
                 i = max(0, min(len(corridor), steps))
                 target = corridor[i]
 
+                self.path_pub.publish(array_to_path(corridor[..., :2]))
+
             else:
 
                 if corridor is None:
-                    rospy.logwarn('Missing corridor')
-                else:
+                    rospy.logfatal('Missing corridor')
+                    rospy.signal_shutdown('Missing corridor')
+                    return
                     
-                    self.controller.set_target_velocity(target[-1])
-                    steering, velocity = self.controller.compute_control(self.state, target[:-1])
+                xt, yt, vt = target
+                self.controller.set_target_velocity(vt)
+                steering, velocity = self.controller.compute_control(self.state, (xt, yt))
 
-                rospy.loginfo(f'Steering: {steering:0.02f} ({delta_str:+0.02f}), Velocity: {velocity:0.02f} ({delta_vel:+0.02f})')
+                rospy.loginfo(f'Steering: {steering:0.02f}, Velocity: {velocity:0.02f}')
                 self.actuator.send_control(steering=steering, velocity=velocity)
 
                 # Sleep

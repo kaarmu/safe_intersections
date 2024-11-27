@@ -14,6 +14,12 @@
 
     <arg name="use_foxglove"    default="false"/>
 
+	<node if="$(eval not is_sim)" name="serial_node" pkg="rosserial_python" type="serial_node.py">
+	    <param name="port" value="/dev/ttyACM0"/>
+	    <param name="baud" value="250000"/>
+	</node>
+
+
     <!-- Start Foxglove -->
     <include if="$(eval use_foxglove)" file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
         <arg name="port" value="8765" />
