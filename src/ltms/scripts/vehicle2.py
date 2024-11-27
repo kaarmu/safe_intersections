@@ -14,6 +14,7 @@ from nats_ros_connector.nats_manager import NATSManager
 
 # ROS imports
 import rospy
+from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Path
 from ltms.msg import NamedBytes
 from ltms.srv import Connect, Notify, Reserve
@@ -208,6 +209,7 @@ class Vehicle:
             self.notify_srv     = rospy.ServiceProxy('/server/notify', Notify)
             self.reserve_srv    = rospy.ServiceProxy('/server/reserve', Reserve)
             self.path_pub       = rospy.Publisher('/path', Path, queue_size=2)
+            self.targ_pub       = rospy.Publisher('/target', PointStamped, queue_size=2)
         else:
             self.connect_srv    = self.nats_mgr.new_serviceproxy('/server/connect', Connect)
             self.notify_srv     = self.nats_mgr.new_serviceproxy('/server/notify', Notify)
@@ -479,6 +481,14 @@ class Vehicle:
                 i = max(0, min(len(corridor), steps))
                 target = corridor[i]
 
+                pnt = PointStamped()
+                pnt.header.stamp = rospy.Time.now()
+                pnt.header.frame_id = 'map'
+                pnt.point.x = target[0]
+                pnt.point.y = target[1]
+                pnt.point.z = target[2]
+
+                self.targ_pub.publish(pnt)
                 self.path_pub.publish(array_to_path(corridor[..., :2]))
 
             else:
