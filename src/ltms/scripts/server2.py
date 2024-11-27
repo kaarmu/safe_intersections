@@ -468,7 +468,7 @@ class Server:
 
             opts = dict(strict=True,
                         _dbgname='reserve')
-            for sess in self.sessions.select(sid, **opts):
+            for sess in self.sessions.select_to_reserve(sid, **opts):
                 sess['name']            = req.name
                 sess['time_ref']        = time_ref
                 sess['entry']           = req.entry
@@ -479,7 +479,9 @@ class Server:
                 sess['latest_exit']     = latest_exit
                 sess['analysis']        = result
                 sess['corridor']        = corridor
-                sess['reserved'] = True
+                
+                sess['arrival_time']    = time_ref
+                sess['reserved']        = True
 
             resp.time_ref       = time_ref.isoformat()
             resp.earliest_entry = earliest_entry
@@ -490,11 +492,12 @@ class Server:
             resp.success        = True
             resp.reason         = ''
 
-    def resolve_dangers(self, time_ref, quiet=False):
+    def resolve_dangers(self, time_ref, quiet=False, safe_access=True):
 
         td_horizon = timedelta(seconds=self.TIME_HORIZON)
 
         opts = dict(lock_all=False,
+                    lock_sel=safe_access,
                     only=self.sessions._reserved,
                     _dbgname='resolve_dangers')
         
@@ -537,16 +540,32 @@ class Server:
 
         rate = rospy.Rate(2)
 
-        while not rospy.is_shutdown():
-            now = datetime.utcnow()
+        vec = lambda n, i: self.solver.grid.coordinate_vectors[n][i]
 
-            for tube in self.resolve_dangers(now, quiet=True):
+        lookahead = timedelta(seconds=5)
+
+        while not rospy.is_shutdown():
+            now = datetime.utcnow() + lookahead
+
+            tubes = list(self.resolve_dangers(now, quiet=True, safe_access=False).values())
+            
+            if tubes:
+
+                # fold
+                tube, *tubes = tubes
+                while tubes:
+                    tube = np.minimum(tube, tubes[0])
+                    _, *tubes = tubes
+
                 tube = shp.project_onto(tube, 0, 1, 2)
+                if not (np.any(tube <= 0) and np.any(tube > 0)): continue
                 values = tube.transpose(1, 2, 0) # x, y, t
                 verts, faces, _, _ = measure.marching_cubes(values, level=0)
                 
+                rospy.loginfo(f'Found tube! Took: {datetime.utcnow() + lookahead - now}')
+                
                 marker = Marker()
-                marker.header.frame_id = "map"
+                marker.header.frame_id = "mocap"
                 marker.type = Marker.TRIANGLE_LIST
                 marker.action = Marker.ADD
 
@@ -554,13 +573,15 @@ class Server:
                 marker.scale.x = 1.0
                 marker.scale.y = 1.0
                 marker.scale.z = 1.0
-                marker.color.a = 1.0
+                marker.color.a = 0.7
                 marker.color.r = 0.0
                 marker.color.g = 1.0
                 marker.color.b = 0.0
 
                 # Add points for the triangles
-                marker.points = [Point(x=verts[i][0], y=verts[i][1], z=verts[i][2])
+                marker.points = [Point(x=vec(0, round(verts[i][0])), 
+                                       y=vec(0, round(verts[i][1])), 
+                                       z=self.solver.timeline[round(verts[i][2]/2)])
                                  for face in faces for i in face]
 
                 marker_pub.publish(marker)

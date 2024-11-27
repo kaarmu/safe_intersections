@@ -1,5 +1,6 @@
 from threading import RLock
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 import rospy
 from ltms_util.debuggable_lock import *
@@ -38,7 +39,7 @@ class SessionMgr:
             if _addorder:
                 self._order += (sid,)
 
-    def _iterate_unlocked(self, *, skip=..., only=..., order=None, _dbgname):
+    def _iterate_unlocked(self, *, skip=..., only=..., order=None, lock_sel=True, _dbgname):
         if order is None:
             items = list(self._sessions.items())
         else:
@@ -48,7 +49,10 @@ class SessionMgr:
         for sid, sess in items:
             if only is not Ellipsis and sid not in only: continue
             if skip is not Ellipsis and sid in skip: continue
-            with sess['lock'](_dbgname):
+            if lock_sel:
+                with sess['lock'](_dbgname):
+                    yield (sid, sess)
+            else:
                 yield (sid, sess)
 
     def iterate(self, *, lock_all=False, _dbgname='', **kwds):
@@ -105,12 +109,12 @@ class SessionMgr:
     def clean(self):
         iter_opts = dict(order=False,
                          lock_all=True,
-                         skip=(self.active_sid,
-                               *self._order),
                          _dbgname='cleaner',)
         
         cleaned = []
-        for sid in self.iterate(**iter_opts):
+        for sid, sess in self.iterate(**iter_opts):
+            if sid == self.active_sid: continue
+            if sess['arrival_time'] + timedelta(seconds=15) < datetime.now(): continue
             del self._sessions[sid]
             self._reserved -= {sid}
             cleaned.append(sid)

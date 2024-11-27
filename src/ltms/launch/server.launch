@@ -13,7 +13,7 @@
     </include>
 
     <!-- Start map_server -->
-    <!-- <node name="map_server" pkg="map_server" type="map_server" args="$(find ltms)/params/map_4way.yml"/> -->
+    <node name="map_server" pkg="map_server" type="map_server" args="$(find svea_core)/maps/sml.yaml"/>
 
     <node if="$(arg use_nats)" name="nats_connector" pkg="nats_ros_connector" type="nats_connector.py" output="screen">
         <param name="host" value="nats://10.0.2.41:4222" />
