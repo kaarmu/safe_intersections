@@ -453,10 +453,11 @@ class Server:
             # corridor/path
             axes = (1, 2, 5)
             corridor = np.array([
-                [self.grid.coordinate_vectors[axes[n]-1][idx]
+                [self.solver.grid.coordinate_vectors[axes[n]-1][idx]
                  for n, idx in enumerate(mean_true_cell(xyv <= 0))]
                 for xyv in shp.project_onto(result['pass4'], 0, *axes)
-            ])
+                if (xyv <= 0).any()
+            ], float)
 
         except AssertionError as e:
             msg, = e.args
